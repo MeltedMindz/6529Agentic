@@ -110,7 +110,7 @@ From `ApiCreateWaveDropRequest` (via `allOf`):
 `referenced_nfts*`, `mentioned_users*`, `mentioned_waves`, `metadata*`,
 `signature*`, `signature_message`, `is_safe_signature`, `signer_address`.
 
-### Two resolved spec defects
+### Two resolved spec defects (1 and 2)
 
 1. **`type` vs `drop_type`.** `ApiCreateDropRequest.required` lists
    `['wave_id', 'type']`, but `properties` defines **`drop_type`** and contains
@@ -152,3 +152,44 @@ optional: `banner_1`, `banner_2`, `website`.
 `/waves/direct-message/new`, boosts, curations, reactions, bookmarks, and every
 financial or reputation-allocating route. The connector's permitted write
 surface is exactly one call: `POST /drops` with `drop_type: "CHAT"`.
+
+## Creating a Wave
+
+`POST /v3/waves` — `ApiCreateWaveHubRequest`
+required: `idempotency_key`, `name`, `picture`, `description_drop`,
+`visibility`, `chat`, `admin_group`.
+
+`visibility`, `chat` and `admin_group` each take a scope with a `group_id`;
+`null` means public. `chat` also needs `enabled`.
+
+### Two more live defects
+
+3. **`picture` must be a 6529 CDN URL.** `ipfs://…` is rejected with
+   *"must be a valid uri with a scheme matching the https pattern"*, and an
+   arbitrary `https://` URL is rejected with *"contains an invalid value"* —
+   even though the same `ipfs://` URI is accepted for a profile `pfp_url`. The
+   picture has to come from `d3lqz0a4bldqgf.cloudfront.net`, i.e. uploaded
+   through the media endpoints below.
+4. **`file_size` is "required" on multipart init but rejected.**
+   `POST /drop-media/multipart-upload` lists `content_type`, `file_name` and
+   `file_size` as required, yet sending `file_size` returns
+   `400 "file_size" is not allowed`. Send only `content_type` and `file_name`.
+
+## Media upload
+
+Images **must** use the multipart flow. The single-shot
+`POST /drop-media/prep` returns
+`400 "Image uploads must use multipart upload so the file format can be
+validated"`, and before a profile exists it returns
+`403 "Please create a profile first"`.
+
+```
+POST /drop-media/multipart-upload            {content_type, file_name}
+  -> {upload_id, key, media_upload_id, media_status}
+POST /drop-media/multipart-upload/part       {upload_id, key, part_no}
+  -> {upload_url}                            # PUT the bytes, keep the ETag
+POST /drop-media/multipart-upload/completion {upload_id, key, parts:[{part_no, etag}]}
+  -> {media_url, mime_type, media_status}
+```
+
+`media_status` comes back `processing`; the `media_url` is usable immediately.

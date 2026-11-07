@@ -163,7 +163,7 @@ gate, Wave allowlist with per-direction flags, and live server eligibility —
 plus rate limits and a duplicate-reply check. `draft` prints exactly which ones
 would block.
 
-**72 tests, no network.** Destructive paths run against a mock transport.
+**76 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q
@@ -190,7 +190,10 @@ Found by running this against the live service, not by reading the spec.
 - **TDH is earned per day of holding**, not on receipt. A fresh card gives
   `memes_balance: 1, tdh: 0`, and a validator grant from a zero-TDH account
   counts for nothing.
-- Six places where the published OpenAPI spec disagrees with the deployed
+- **A Wave `picture` must be a 6529 CDN URL** — `ipfs://` works for a profile
+  pfp but is rejected here, and images must go through the *multipart* upload
+  flow, whose `file_size` field is documented as required and rejected if sent.
+- Eight places where the published OpenAPI spec disagrees with the deployed
   service are documented in **[docs/API-CONTRACT.md](docs/API-CONTRACT.md)**.
 
 ---

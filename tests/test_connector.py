@@ -856,3 +856,37 @@ def test_bankr_signer_requires_explicit_address():
     """A shared repo must not default to anyone's wallet."""
     with pytest.raises(c.SixtyFiveError, match="refusing to guess"):
         c.BankrSigner()
+
+
+def test_validator_status_surfaces_permission_fix(monkeypatch):
+    """A locked-down data dir should name the fix, not 'unexpected exit'."""
+    import subprocess as sp
+    msg = ('validator status: only the service\'s account may read '
+           '"/Library/Application Support/6529-validator". '
+           'Run `sudo -u _validator6529 validator status`')
+    monkeypatch.setattr(val.subprocess, "run",
+                        lambda cmd, **kw: sp.CompletedProcess(cmd, 1, "", msg))
+    r = val.status()
+    assert r["permission_denied"] is True
+    assert r["run_as"] == "_validator6529"
+    assert "sudo -u _validator6529" in r["hint"]
+    assert r["needs_attention"] is False, "a setup note is not a validator alarm"
+
+
+def test_add_wave_rejects_shell_mangled_id(tmpstate, capsys):
+    """zsh's :A modifier turns "$WID:Name" into a path. Catch it, do not store it."""
+    from agent6529 import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(["config", "--add-wave", "/Users/x/clawd/abc-123xioms Corner"])
+    assert "malformed wave id" in str(e.value)
+    assert "--wave-name" in str(e.value)
+
+
+def test_add_wave_accepts_separate_name(tmpstate):
+    from agent6529 import cli
+    wid = "f4622186-75a0-4289-b998-c33452e68fb0"
+    cli.main(["config", "--add-wave", wid, "--wave-name", "Axioms Corner",
+              "--reply-ok"])
+    cfg = pol.load_config()
+    entry = next(w for w in cfg["waves"] if w["id"] == wid)
+    assert entry["name"] == "Axioms Corner" and entry["reply_ok"] is True

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import urllib.request
@@ -235,6 +236,30 @@ def status(data_dir: Optional[str] = None, binary: str = VALIDATOR_BIN,
         EXIT_STOPPED: "not running",
     }.get(r.returncode, f"unexpected exit {r.returncode}")
 
+    text = (r.stdout or "") + (r.stderr or "")
+
+    # The data directory is mode 0700 and owned by the service account, so a
+    # plain user gets a refusal rather than a status. Surface the fix the
+    # binary itself prints instead of reporting "unexpected exit".
+    if "only the service's account may read" in text or "Permission denied" in text:
+        m = re.search(r"sudo -u (\S+)", text)
+        user = m.group(1) if m else "<service user>"
+        dd = re.search(r'"([^"]*6529-validator[^"]*)"', text)
+        hint = f"sudo -u {user} validator status"
+        if dd:
+            hint += f' --data-dir "{dd.group(1)}"'
+        return {
+            "exit_code": r.returncode,
+            "healthy": None,
+            "needs_attention": False,
+            "meaning": "cannot read the validator data directory from this account",
+            "permission_denied": True,
+            "run_as": user,
+            "hint": hint,
+            "alerts": None,
+            "raw": text.strip()[:500],
+        }
+
     payload: Any = None
     if as_json and r.stdout.strip():
         try:
@@ -247,7 +272,7 @@ def status(data_dir: Optional[str] = None, binary: str = VALIDATOR_BIN,
         "needs_attention": r.returncode in (EXIT_ATTENTION, EXIT_STOPPED),
         "meaning": meaning,
         "alerts": (payload or {}).get("alerts") if isinstance(payload, dict) else None,
-        "raw": payload if payload is not None else (r.stdout or r.stderr)[:4000],
+        "raw": payload if payload is not None else text[:4000],
     }
 
 

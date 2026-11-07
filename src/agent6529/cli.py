@@ -304,7 +304,20 @@ def cmd_config(args) -> int:
         cfg.setdefault("identity", {})["expected_address"] = args.expected_address
         changed["expected_address"] = args.expected_address
     if args.add_wave:
+        # Accept "<id>:<name>" or a bare id plus --wave-name. The combined form
+        # is a foot-gun in zsh, where "$VAR:A..." triggers the :A (realpath)
+        # history modifier and silently corrupts the id, so validate it.
         wid, _, name = args.add_wave.partition(":")
+        if args.wave_name:
+            name = args.wave_name
+        wid = wid.strip()
+        if "/" in wid or len(wid) != 36 or wid.count("-") != 4:
+            raise SystemExit(
+                f"--add-wave got a malformed wave id: {wid!r}\n"
+                "A wave id is a 36-character UUID. If you used \"$VAR:Name\" in "
+                "zsh, the shell applied its :A modifier. Use "
+                "--add-wave <id> --wave-name \"Name\" instead."
+            )
         waves = [w for w in cfg.get("waves", []) if w.get("id") != wid]
         waves.append({
             "id": wid, "name": name or None,
@@ -630,7 +643,11 @@ def cmd_validator(args) -> int:
         local = v.status(data_dir=args.data_dir)
         rel = v.check_release()
         problems = []
-        if not local["healthy"]:
+        if local.get("permission_denied"):
+            problems.append(
+                f"cannot read validator status from this account; run: {local['hint']}"
+            )
+        elif local["healthy"] is False:
             problems.append(f"validator: {local['meaning']}")
         if rel.below_min_supported:
             problems.append(
@@ -831,6 +848,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--signer", default=None, choices=["bankr", "keychain"])
     sp.add_argument("--expected-address", default=None)
     sp.add_argument("--add-wave", default=None, metavar="ID[:NAME]")
+    sp.add_argument("--wave-name", default=None,
+                    help="name for --add-wave; safer than the ID:NAME form")
     sp.add_argument("--remove-wave", default=None)
     sp.add_argument("--top-level-ok", action="store_true")
     sp.add_argument("--reply-ok", action="store_true")
