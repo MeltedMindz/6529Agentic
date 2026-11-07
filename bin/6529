@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# 6529 - agent connector for 6529.io
+#
+# Resolves its own repo so it works from anywhere, including a cron job with a
+# minimal environment.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "${PYTHON:-python3}" -m agent6529.cli "$@"

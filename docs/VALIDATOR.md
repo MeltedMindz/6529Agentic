@@ -191,14 +191,14 @@ permanently.
 
 ## Managing it from this repo
 
-`src/sixty529/validator.py` wraps the binary and the feed so an agent can
+`src/agent6529/validator.py` wraps the binary and the feed so an agent can
 monitor and upgrade without a browser.
 
 ```bash
-PYTHONPATH=src python3 -m sixty529.cli validator release   # feed vs installed
-PYTHONPATH=src python3 -m sixty529.cli validator status    # local health
-PYTHONPATH=src python3 -m sixty529.cli validator watch     # one verdict, for cron
-PYTHONPATH=src python3 -m sixty529.cli account <handle>    # TDH, REP, cards
+PYTHONPATH=src python3 -m agent6529.cli validator release   # feed vs installed
+PYTHONPATH=src python3 -m agent6529.cli validator status    # local health
+PYTHONPATH=src python3 -m agent6529.cli validator watch     # one verdict, for cron
+PYTHONPATH=src python3 -m agent6529.cli account <handle>    # TDH, REP, cards
 ```
 
 `validator watch` exits **0** when healthy and **5** when something needs you —
@@ -244,7 +244,7 @@ A validator's weight is the TDH of the account that grants it, so a grant from
 an account with `tdh: 0` runs correctly and counts for nothing.
 
 TDH accrues **per day of holding** — receiving a card does not grant TDH
-immediately. `sixty529 account <handle>` surfaces this directly: it reports
+immediately. `6529 account <handle>` surfaces this directly: it reports
 `memes_balance` alongside `tdh` and says so when an account holds cards but has
 not accrued yet. Cards are at
 [thememes.exchange](https://thememes.exchange/memes/max-tdh) and

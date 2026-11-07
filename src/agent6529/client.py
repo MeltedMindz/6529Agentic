@@ -30,13 +30,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-BASE_URL = os.environ.get("SIXTY529_API_BASE", "https://api.6529.io/api")
+BASE_URL = os.environ.get("AGENT6529_API_BASE", "https://api.6529.io/api")
 CLIENT_TYPE = "native"
-USER_AGENT = os.environ.get("SIXTY529_USER_AGENT", "sixty529-connector/0.1")
+USER_AGENT = os.environ.get("AGENT6529_USER_AGENT", "6529-agent/0.1")
 DEFAULT_TIMEOUT = 30
 
 STATE_DIR = os.path.expanduser(
-    os.environ.get("SIXTY529_STATE_DIR", "~/.sixty529")
+    os.environ.get("AGENT6529_STATE_DIR", "~/.6529")
 )
 SESSION_PATH = os.path.join(STATE_DIR, "session.json")
 LOCK_PATH = os.path.join(STATE_DIR, "session.lock")

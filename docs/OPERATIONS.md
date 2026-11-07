@@ -4,19 +4,19 @@ Host-agnostic. Wire the commands below into whatever scheduler your agent uses.
 
 | thing | where |
 |---|---|
-| code | `src/sixty529/` |
-| entrypoint | `sixty529` |
+| code | `src/agent6529/` |
+| entrypoint | `6529` |
 | host skill/tool | your agent's registration mechanism |
 | cron job | your scheduler |
 | cron script | `(host cron script)` |
-| state | `~/.sixty529/` (`connector.sqlite`, `config.json`, `session.json`, `PAUSED`) |
+| state | `~/.6529/` (`connector.sqlite`, `config.json`, `session.json`, `PAUSED`) |
 | API contract | `contract.md` |
-| tests | `scripts/sixty529/tests/test_connector.py` (54 passing) |
+| tests | `tests/test_connector.py` (54 passing) |
 
 Every command prints JSON:
 
 ```bash
-sixty529 <command>
+6529 <command>
 ```
 
 ## Operating modes
@@ -28,7 +28,7 @@ sixty529 <command>
 | `live` | yes | yes | only within every gate below |
 
 ```bash
-sixty529 config --mode draft
+6529 config --mode draft
 ```
 
 ### The five independent publish gates
@@ -39,7 +39,7 @@ reported by name:
 1. `mode == "live"`
 2. connector not paused (`PAUSED` flag absent)
 3. framework gate `security.public_posts_default: true` in
-   `~/.sixty529/gate.yml` or `axiom.local.yml`
+   `~/.6529/gate.yml` or `axiom.local.yml`
 4. wave in the local allowlist with `top_level_ok` / `reply_ok` set
 5. server-side eligibility: chat enabled, viewer eligible, reply permission
    (tracked separately), no slow-mode cooldown, no active pause
@@ -53,16 +53,16 @@ Plus rate limits and the no-duplicate-reply check.
 ## Connection
 
 ```bash
-sixty529 status        # mode, gate, auth, identity, waves
-sixty529 connect       # native session-v2 login
-sixty529 disconnect    # scoped logout (this session only)
+6529 status        # mode, gate, auth, identity, waves
+6529 connect       # native session-v2 login
+6529 disconnect    # scoped logout (this session only)
 ```
 
 `connect` needs a signer:
 
 ```bash
-sixty529 config \
-  --keychain-service openclaw.SIXTY529_SIGNER_KEY \
+6529 config \
+  --keychain-service openclaw.AGENT6529_SIGNER_KEY \
   --expected-address 0x<the matching address>
 ```
 
@@ -85,10 +85,10 @@ to. A mismatch refuses rather than proceeding.
 ## Waves
 
 ```bash
-sixty529 waves --view HOT
-sixty529 waves --view SEARCH --name agent
-sixty529 read <wave_id>        # drops + BOTH eligibilities
-sixty529 config --add-wave "<id>:<name>" --reply-ok
+6529 waves --view HOT
+6529 waves --view SEARCH --name agent
+6529 read <wave_id>        # drops + BOTH eligibilities
+6529 config --add-wave "<id>:<name>" --reply-ok
 ```
 
 Flags: `--reply-ok` permits replies, `--top-level-ok` permits new threads.
@@ -109,12 +109,12 @@ publish time.
 
 ```bash
 # stage (safe in every mode) — prints payload + what would block it
-sixty529 draft <wave_id> --content "..."
-sixty529 draft <wave_id> --content "..." \
+6529 draft <wave_id> --content "..."
+6529 draft <wave_id> --content "..." \
     --reply-to <drop_id> --reply-part 1
 
-sixty529 pending --status draft
-sixty529 publish <client_drop_id>
+6529 pending --status draft
+6529 publish <client_drop_id>
 ```
 
 Editing a draft creates a **new** action with a new `client_drop_id`, so it
@@ -136,8 +136,8 @@ A lost response does not duplicate: the connector looks for a drop carrying its
 ## Inbox and ingestion
 
 ```bash
-sixty529 inbox --unread-only
-sixty529 ingest --verbose
+6529 inbox --unread-only
+6529 ingest --verbose
 ```
 
 - First run is bounded by `initial_lookback_hours` (24) so it cannot reply to
@@ -151,10 +151,10 @@ sixty529 ingest --verbose
 ## Pause and shutdown
 
 ```bash
-sixty529 pause --reason "..."   # blocks all sends
-sixty529 resume
-sixty529 config --mode observe  # stronger: no publishing
-sixty529 disconnect             # drop the session
+6529 pause --reason "..."   # blocks all sends
+6529 resume
+6529 config --mode observe  # stronger: no publishing
+6529 disconnect             # drop the session
 ```
 
 Full stop, strongest first: `disconnect` → `config --mode observe` → `pause`.
@@ -193,9 +193,9 @@ The connector is additive. To remove it:
 
 ```bash
 <your scheduler> remove <job-id>
-rm -rf src/sixty529 tests
+rm -rf src/agent6529 tests
 # state kept for audit; delete only if you mean it:
-# rm -rf ~/.sixty529
+# rm -rf ~/.6529
 ```
 
 ## Receipts

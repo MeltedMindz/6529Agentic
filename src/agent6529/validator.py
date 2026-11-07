@@ -29,12 +29,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 FEED_URL = os.environ.get(
-    "SIXTY529_VALIDATOR_FEED", "https://6529.io/validator/releases.json"
+    "AGENT6529_VALIDATOR_FEED", "https://6529.io/validator/releases.json"
 )
 DOWNLOAD_BASE = os.environ.get(
-    "SIXTY529_VALIDATOR_DOWNLOAD", "https://6529.io/validator/download"
+    "AGENT6529_VALIDATOR_DOWNLOAD", "https://6529.io/validator/download"
 )
-VALIDATOR_BIN = os.environ.get("SIXTY529_VALIDATOR_BIN", "validator")
+VALIDATOR_BIN = os.environ.get("AGENT6529_VALIDATOR_BIN", "validator")
 
 # Exit codes documented in docs/install/operations.md ("For a watchdog").
 EXIT_OK = 0          # running, nothing needs you
@@ -55,7 +55,7 @@ def fetch_feed(url: str = FEED_URL, timeout: int = 30) -> Dict[str, Any]:
     that check, so treat the feed as advisory for *scheduling* and always
     verify the artifact SHA-256 before running anything.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "sixty529-validator/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "agent6529/0.1"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
@@ -172,7 +172,7 @@ def download_release(version: str, dest_dir: str,
     os.makedirs(dest_dir, exist_ok=True)
     path = os.path.join(dest_dir, name)
     url = f"{DOWNLOAD_BASE}/{version}/{name}"
-    req = urllib.request.Request(url, headers={"User-Agent": "sixty529-validator/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "agent6529/0.1"})
     h = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=timeout) as r, open(path, "wb") as fh:
         while True:

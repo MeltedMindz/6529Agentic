@@ -24,7 +24,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 STATE_DIR = os.path.expanduser(
-    os.environ.get("SIXTY529_STATE_DIR", "~/.sixty529")
+    os.environ.get("AGENT6529_STATE_DIR", "~/.6529")
 )
 DB_PATH = os.path.join(STATE_DIR, "connector.sqlite")
 

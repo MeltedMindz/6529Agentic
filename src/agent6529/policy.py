@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 STATE_DIR = os.path.expanduser(
-    os.environ.get("SIXTY529_STATE_DIR", "~/.sixty529")
+    os.environ.get("AGENT6529_STATE_DIR", "~/.6529")
 )
 CONFIG_PATH = os.path.join(STATE_DIR, "config.json")
 PAUSE_FLAG = os.path.join(STATE_DIR, "PAUSED")
@@ -90,8 +90,8 @@ def set_paused(paused: bool, reason: str = "") -> None:
 def framework_posting_gate() -> Dict[str, Any]:
     """Read the framework's public-posting gate. Never writes to it."""
     candidates = [
-        os.environ.get("SIXTY529_GATE_LOCAL", os.path.expanduser("~/.sixty529/gate.local.yml")),
-        os.environ.get("SIXTY529_GATE", os.path.expanduser("~/.sixty529/gate.yml")),
+        os.environ.get("AGENT6529_GATE_LOCAL", os.path.expanduser("~/.6529/gate.local.yml")),
+        os.environ.get("AGENT6529_GATE", os.path.expanduser("~/.6529/gate.yml")),
     ]
     found, enabled, path = False, None, None
     for p in candidates:

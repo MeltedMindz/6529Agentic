@@ -1,6 +1,6 @@
 """Operator CLI for Axiom's 6529 connector.
 
-    sixty529 connect | status | waves | read | inbox | draft | publish
+    6529 connect | status | waves | read | inbox | draft | publish
              | pause | resume | disconnect | ingest | config
 
 Every publishing path goes through policy.can_publish(). `observe` and `draft`
@@ -19,10 +19,10 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sixty529 import client as c  # noqa: E402
-from sixty529 import policy as pol  # noqa: E402
-from sixty529 import publisher as pub  # noqa: E402
-from sixty529.state import Store  # noqa: E402
+from agent6529 import client as c  # noqa: E402
+from agent6529 import policy as pol  # noqa: E402
+from agent6529 import publisher as pub  # noqa: E402
+from agent6529.state import Store  # noqa: E402
 
 
 def out(obj: Any) -> None:
@@ -49,7 +49,7 @@ def build_api(cfg: Dict[str, Any], need_signer: bool = False) -> c.SixtyFiveClie
         signer = c.KeychainSigner(service=svc)
     elif need_signer:
         raise SystemExit(
-            "no signer configured. Use `sixty529 config --signer bankr` or "
+            "no signer configured. Use `6529 config --signer bankr` or "
             "`--keychain-service <name>`"
         )
     return c.SixtyFiveClient(signer=signer)
@@ -557,7 +557,7 @@ def cmd_respond(args) -> int:
         "reply_to": args.drop_id,
         "would_publish": decision.allowed,
         "blocking_reasons": decision.reasons,
-        "next": f"sixty529 publish {cdid}" if decision.allowed else None,
+        "next": f"6529 publish {cdid}" if decision.allowed else None,
     })
     return 0
 
@@ -608,7 +608,7 @@ def cmd_account(args) -> int:
 
 # ---------------------------------------------------------------- validator
 def cmd_validator(args) -> int:
-    from sixty529 import validator as v
+    from agent6529 import validator as v
 
     if args.action == "release":
         st = v.check_release()
@@ -646,8 +646,87 @@ def cmd_validator(args) -> int:
     raise SystemExit(f"unknown validator action {args.action}")
 
 
+def cmd_profile(args) -> int:
+    """Create or update this agent's 6529 profile.
+
+    POST /profiles is create-or-update over the WHOLE object, so existing
+    values are read first and carried forward. Omitting a field would blank it.
+    """
+    cfg = pol.load_config()
+    api = build_api(cfg)
+    auth = api.auth_status()
+    if not auth.get("connected"):
+        out({"error": "reconnect_required", "fix": "6529 connect"})
+        return 2
+    if not auth.get("acting_as_self", True):
+        out({"error": "refusing_to_write_as_proxy", "role": auth.get("role")})
+        return 3
+
+    addr = auth["address"]
+    existing = api.identity_by_wallet(addr)
+    is_new = c.SixtyFiveClient.is_placeholder_identity(existing)
+
+    handle = args.handle or existing.get("handle")
+    if not handle or handle.lower().startswith("id-0x"):
+        raise SystemExit("need --handle (the lookup returned only a placeholder)")
+
+    pfp = args.pfp or existing.get("pfp")
+    if not pfp:
+        raise SystemExit(
+            "need --pfp: an ipfs:// URI or a https://d3lqz0a4bldqgf... URL. "
+            "Other hosts are rejected by the API."
+        )
+    if not (pfp.startswith("ipfs://") or pfp.startswith("https://d3lqz0a4bldqgf")):
+        raise SystemExit(
+            f"pfp_url {pfp!r} will be rejected: it must be ipfs:// or the 6529 CDN"
+        )
+
+    body = {
+        "handle": handle,
+        "classification": args.classification or existing.get("classification") or "AI",
+        "sub_classification": args.sub_classification or "AI_AGENT",
+        "pfp_url": pfp,
+    }
+    website = args.website or existing.get("website")
+    if website:
+        body["website"] = website
+    for k in ("banner_1", "banner_2"):
+        if existing.get(k):
+            body[k] = existing[k]   # carry forward, never blank
+
+    if args.dry_run:
+        out({"dry_run": True, "would_post": body, "creating_new": is_new,
+             "acting_as": addr})
+        return 0
+
+    created = api._request("POST", "/profiles", body=body)
+    result = {
+        "created" if is_new else "updated": True,
+        "handle": created.get("handle"),
+        "profile_id": created.get("id"),
+        "classification": created.get("classification"),
+        "pfp": created.get("pfp"),
+        "wallet": created.get("primary_wallet"),
+        "url": f"https://6529.io/{created.get('handle')}",
+    }
+
+    if args.bio:
+        # There is no bio field on the profile; it is a separate statement.
+        try:
+            api._request("POST", f"/profiles/{handle}/cic/statements",
+                         body={"statement_group": "GENERAL",
+                               "statement_type": "BIO",
+                               "statement_comment": "about",
+                               "statement_value": args.bio})
+            result["bio_statement"] = "created"
+        except c.SixtyFiveError as e:
+            result["bio_statement_error"] = str(e)[:200]
+    out(result)
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(prog="sixty529",
+    p = argparse.ArgumentParser(prog="6529",
                                 description="Axiom 6529.io connector")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -715,6 +794,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--reply-part", type=int, default=1)
     sp.set_defaults(fn=cmd_respond)
 
+    sp = sub.add_parser("profile", help="create or update your 6529 profile")
+    sp.add_argument("action", nargs="?", default="create", choices=["create", "update"])
+    sp.add_argument("--handle", default=None)
+    sp.add_argument("--pfp", default=None, metavar="ipfs://CID")
+    sp.add_argument("--website", default=None)
+    sp.add_argument("--bio", default=None, help="stored as a GENERAL/BIO statement")
+    sp.add_argument("--classification", default=None,
+                    choices=["AI", "BOT", "PSEUDONYM", "ORGANIZATION",
+                             "GOVERNMENT_NAME", "PARODY", "COLLECTION"])
+    sp.add_argument("--sub-classification", default=None)
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(fn=cmd_profile)
+
     sp = sub.add_parser("account",
                         help="identity, TDH, REP and card holdings")
     sp.add_argument("identity", nargs="?", default=None)
@@ -747,7 +839,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return args.fn(args)
     except c.ReconnectRequired as e:
         out({"error": "reconnect_required", "detail": str(e),
-             "fix": "sixty529 connect"})
+             "fix": "6529 connect"})
         return 2
     except c.SixtyFiveError as e:
         out({"error": type(e).__name__, "detail": str(e)})

@@ -3,7 +3,7 @@
 No network. Destructive and spam-producing paths are exercised through a
 mock transport so they are never sent to the live service.
 
-Run:  python3 -m pytest scripts/sixty529/tests/test_connector.py -q
+Run:  python3 -m pytest tests/test_connector.py -q
 """
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from sixty529 import client as c  # noqa: E402
-from sixty529 import policy as pol  # noqa: E402
-from sixty529 import publisher as pub  # noqa: E402
-from sixty529.state import Store  # noqa: E402
+from agent6529 import client as c  # noqa: E402
+from agent6529 import policy as pol  # noqa: E402
+from agent6529 import publisher as pub  # noqa: E402
+from agent6529.state import Store  # noqa: E402
 
 WAVE = "wave-aaa"
 ADDR = "0x1111111111111111111111111111111111111111"
@@ -69,7 +69,7 @@ class FakeSigner:
 @pytest.fixture
 def tmpstate(monkeypatch):
     d = tempfile.mkdtemp()
-    monkeypatch.setenv("SIXTY529_STATE_DIR", d)
+    monkeypatch.setenv("AGENT6529_STATE_DIR", d)
     monkeypatch.setattr(c, "SESSION_PATH", os.path.join(d, "session.json"))
     monkeypatch.setattr(c, "LOCK_PATH", os.path.join(d, "session.lock"))
     monkeypatch.setattr(pol, "STATE_DIR", d)
@@ -737,7 +737,7 @@ def test_bankr_signer_allows_address_not_on_denylist():
 
 
 # ---------------------------------------------------------- validator module
-from sixty529 import validator as val  # noqa: E402
+from agent6529 import validator as val  # noqa: E402
 
 FEED = {
     "sequence": 1794058121,

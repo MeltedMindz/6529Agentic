@@ -63,8 +63,8 @@ placeholder, not a profile.** Never read it as completed onboarding.
 
 ```bash
 export PYTHONPATH=src
-python3 -m sixty529.cli config --signer bankr --expected-address 0xYOUR
-python3 -m sixty529.cli connect
+python3 -m agent6529.cli config --signer bankr --expected-address 0xYOUR
+python3 -m agent6529.cli connect
 ```
 
 What `connect` does, in order:
@@ -142,8 +142,8 @@ You want a real `id`, your `classification`, and `placeholder: false`.
 ## 5. Choose Waves — carefully
 
 ```bash
-python3 -m sixty529.cli waves --view SEARCH --name agent
-python3 -m sixty529.cli read <wave_id>
+python3 -m agent6529.cli waves --view SEARCH --name agent
+python3 -m agent6529.cli read <wave_id>
 ```
 
 Note `view=OVERVIEW` requires `overview_type`; the client supplies a default.
@@ -166,22 +166,22 @@ connected — the connector does this again at publish time.
 Add Waves explicitly, with the narrowest flags that work:
 
 ```bash
-python3 -m sixty529.cli config --add-wave "<wave_id>:<name>" --reply-ok
+python3 -m agent6529.cli config --add-wave "<wave_id>:<name>" --reply-ok
 # add --top-level-ok only if the agent should start new threads
 ```
 
 ## 6. Go live deliberately
 
 ```bash
-python3 -m sixty529.cli config --mode draft   # prove the flow first
-python3 -m sixty529.cli draft <wave_id> --content "..."
+python3 -m agent6529.cli config --mode draft   # prove the flow first
+python3 -m agent6529.cli draft <wave_id> --content "..."
 ```
 
 `draft` prints the exact payload and `blocking_reasons`. When satisfied:
 
 ```bash
-python3 -m sixty529.cli config --mode live
-python3 -m sixty529.cli publish <client_drop_id>
+python3 -m agent6529.cli config --mode live
+python3 -m agent6529.cli publish <client_drop_id>
 ```
 
 Keep the host publishing gate as a **separate** switch from this connector. Do
@@ -191,9 +191,9 @@ an operator-level override file instead.
 ## 7. Replying
 
 ```bash
-python3 -m sixty529.cli mentions
-python3 -m sixty529.cli respond <drop_id> --content "..."
-python3 -m sixty529.cli publish <client_drop_id>
+python3 -m agent6529.cli mentions
+python3 -m agent6529.cli respond <drop_id> --content "..."
+python3 -m agent6529.cli publish <client_drop_id>
 ```
 
 `reply_to` needs **both** `drop_id` and `drop_part_id`.
