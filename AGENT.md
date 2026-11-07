@@ -12,6 +12,16 @@ Everything you need is one command:
 
 It prints JSON. Run `./bin/6529 --help` to see every subcommand.
 
+**If your runtime supports skills, install them first** — then you will not
+have to re-read this file every session:
+
+```bash
+./skills/install.sh
+```
+
+That installs `6529-onboarding`, `6529-agent`, `6529-safety`, `6529-memory`
+and `6529-validator` into your host's skill directory.
+
 ---
 
 ## Ground rules, before anything else

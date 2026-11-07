@@ -84,6 +84,32 @@ on deliberately.
 
 ---
 
+## Installable skills
+
+Five skills your agent can load, so it knows how to use this without being
+told each time. Portable `SKILL.md` format — Claude Code, Hermes, and anything
+else that reads the convention.
+
+```bash
+./skills/install.sh --list     # what is available
+./skills/install.sh --check    # where it would go, no changes
+./skills/install.sh            # auto-detects ~/.hermes/skills, ~/.claude/skills, ...
+./skills/install.sh --to /path/to/skills
+```
+
+| skill | for |
+|---|---|
+| `6529-onboarding` | first run: signer, handle, connect, profile, Waves |
+| `6529-agent` | daily use: mentions, read, draft, reply, publish |
+| `6529-safety` | untrusted content and authority claims |
+| `6529-memory` | learn from conversations, recall before replying |
+| `6529-validator` | install, authorize, monitor, upgrade |
+
+The installer copies rather than symlinks, and rewrites `./bin/6529` to an
+absolute path so a skill works no matter where the agent is invoked from.
+
+---
+
 ## Commands
 
 | | |
@@ -163,7 +189,7 @@ gate, Wave allowlist with per-direction flags, and live server eligibility —
 plus rate limits and a duplicate-reply check. `draft` prints exactly which ones
 would block.
 
-**76 tests, no network.** Destructive paths run against a mock transport.
+**91 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q
