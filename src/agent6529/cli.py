@@ -41,10 +41,12 @@ def build_api(cfg: Dict[str, Any], need_signer: bool = False) -> c.SixtyFiveClie
     svc = ident.get("keychain_service")
     signer = None
     if backend == "bankr":
-        signer = c.BankrSigner(
-            address=ident.get("expected_address")
-            or "0xef2cc7d15d3421629f93ffa39727f14179f31c75"
-        )
+        addr = ident.get("expected_address")
+        if not addr:
+            raise SystemExit(
+                "signer 'bankr' needs --expected-address: the wallet it signs for"
+            )
+        signer = c.BankrSigner(address=addr)
     elif svc:
         signer = c.KeychainSigner(service=svc)
     elif need_signer:

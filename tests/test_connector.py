@@ -850,3 +850,9 @@ def test_grant_draft_surfaces_failure(monkeypatch):
                         lambda cmd, **kw: sp.CompletedProcess(cmd, 1, "", "no ref-block"))
     with pytest.raises(val.ValidatorError, match="ref-block"):
         val.grant_draft("0xabc", "deadbeef")
+
+
+def test_bankr_signer_requires_explicit_address():
+    """A shared repo must not default to anyone's wallet."""
+    with pytest.raises(c.SixtyFiveError, match="refusing to guess"):
+        c.BankrSigner()

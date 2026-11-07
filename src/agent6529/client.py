@@ -171,7 +171,7 @@ class BankrSigner:
     wallet_kind_hint stays "eoa". Check before assuming.
     """
 
-    address: str = "0xef2cc7d15d3421629f93ffa39727f14179f31c75"
+    address: str = ""          # set it explicitly; there is no default
     bankr_bin: str = "/opt/homebrew/bin/bankr"
     timeout: int = 180
 
@@ -180,6 +180,10 @@ class BankrSigner:
     denylist: tuple = ()
 
     def __post_init__(self):
+        if not self.address:
+            raise SixtyFiveError(
+                "BankrSigner needs an explicit address; refusing to guess one"
+            )
         if self.address.lower() in {d.lower() for d in self.denylist}:
             raise SixtyFiveError(
                 f"refusing to sign with denylisted wallet {self.address}"

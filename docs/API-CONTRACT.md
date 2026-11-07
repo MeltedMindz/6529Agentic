@@ -53,8 +53,9 @@ is authoritative. A signer must be able to satisfy verification **on the chain
 the returned challenge names**. A smart-contract wallet deployed only on Base
 cannot satisfy EIP-1271 verification on Ethereum mainnet, because there is no
 code at that address on mainnet to call `isValidSignature`. Verified
-2026-11-07: `eth_getCode` for `0xef2cc7d1…f31c75` returns code on Base and
-empty on Ethereum mainnet.
+2026-11-07 against a real wallet: `eth_getCode` returned a 23-byte EIP-7702
+delegation on Base and empty on Ethereum mainnet. Check your own signer the
+same way before assuming it can satisfy a given chain.
 
 ## Reads
 
