@@ -562,6 +562,90 @@ def cmd_respond(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- account/TDH
+def cmd_account(args) -> int:
+    """Monitor a 6529 account: identity, TDH, REP, card holdings."""
+    cfg = pol.load_config()
+    api = build_api(cfg)
+    who = args.identity or (cfg.get("identity") or {}).get("expected_handle")
+    if not who:
+        raise SystemExit("no identity; pass one or set identity.expected_handle")
+
+    ident = api._request("GET", f"/identities/{who}", auth=False)
+    out_obj = {
+        "handle": ident.get("handle"),
+        "profile_id": ident.get("id"),
+        "wallet": ident.get("primary_wallet"),
+        "classification": ident.get("classification"),
+        "level": ident.get("level"),
+        "tdh": ident.get("tdh"),
+        "rep": ident.get("rep"),
+        "cic": ident.get("cic"),
+    }
+    try:
+        st = api._request("GET", f"/collected-stats/{who}", auth=False)
+        out_obj["memes_balance"] = st.get("memes_balance")
+        out_obj["unique_memes"] = st.get("unique_memes")
+        out_obj["gradients_balance"] = st.get("gradients_balance")
+        out_obj["boost"] = st.get("boost")
+        seasons = [s for s in (st.get("seasons") or [])
+                   if s.get("total_cards_held")]
+        out_obj["seasons_with_cards"] = seasons
+    except c.SixtyFiveError as e:
+        out_obj["collected_stats_error"] = str(e)[:120]
+
+    # TDH of 0 with cards held means TDH has not accrued yet - it is earned
+    # per day of holding, not granted on receipt.
+    if out_obj.get("tdh") == 0 and out_obj.get("memes_balance"):
+        out_obj["note"] = ("holds cards but TDH is 0: TDH accrues daily from "
+                           "holding and the index updates once a day")
+    elif out_obj.get("tdh") == 0:
+        out_obj["note"] = ("no TDH: a validator grant from this account would "
+                           "carry no consensus weight until it earns some")
+    out(out_obj)
+    return 0
+
+
+# ---------------------------------------------------------------- validator
+def cmd_validator(args) -> int:
+    from sixty529 import validator as v
+
+    if args.action == "release":
+        st = v.check_release()
+        d = st.as_dict()
+        d["upgrade_steps"] = v.plan_upgrade(st) if st.upgrade_available else None
+        d["urgent"] = st.urgent
+        out(d)
+        return 5 if st.urgent else 0
+
+    if args.action == "status":
+        r = v.status(data_dir=args.data_dir)
+        out(r)
+        return 0 if r["healthy"] else 5
+
+    if args.action == "watch":
+        # One combined verdict for a scheduler: local health + release currency.
+        local = v.status(data_dir=args.data_dir)
+        rel = v.check_release()
+        problems = []
+        if not local["healthy"]:
+            problems.append(f"validator: {local['meaning']}")
+        if rel.below_min_supported:
+            problems.append(
+                f"version {rel.installed} is below min_supported "
+                f"{rel.min_supported}; it will stop counting"
+            )
+        elif rel.upgrade_available:
+            problems.append(f"upgrade available: {rel.installed} -> {rel.latest}")
+        if rel.deadline:
+            problems.append(f"deadline {rel.deadline}: {rel.deadline_reason}")
+        out({"ok": not problems, "problems": problems,
+             "local": local, "release": rel.as_dict()})
+        return 0 if not problems else 5
+
+    raise SystemExit(f"unknown validator action {args.action}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="sixty529",
                                 description="Axiom 6529.io connector")
@@ -630,6 +714,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--content", required=True)
     sp.add_argument("--reply-part", type=int, default=1)
     sp.set_defaults(fn=cmd_respond)
+
+    sp = sub.add_parser("account",
+                        help="identity, TDH, REP and card holdings")
+    sp.add_argument("identity", nargs="?", default=None)
+    sp.set_defaults(fn=cmd_account)
+
+    sp = sub.add_parser("validator", help="manage a 6529 validator")
+    sp.add_argument("action", choices=["status", "release", "watch"])
+    sp.add_argument("--data-dir", default=None)
+    sp.set_defaults(fn=cmd_validator)
 
     sp = sub.add_parser("ingest")
     sp.add_argument("--limit", type=int, default=20)

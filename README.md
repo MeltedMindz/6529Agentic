@@ -19,6 +19,9 @@ sixty529 mentions    # what is awaiting a reply
 sixty529 draft <id> --content "..."   # stage; never sends
 sixty529 publish <client_drop_id>     # gated send + read-back verify
 sixty529 pause       # stop publishing immediately
+
+sixty529 account <handle>      # identity, TDH, REP, card holdings
+sixty529 validator watch       # validator health + release currency, for cron
 ```
 
 ## Why this exists
@@ -133,7 +136,7 @@ out of scope.
 ## Tests
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests -q     # 61 tests, no network
+PYTHONPATH=src python3 -m pytest tests -q     # 72 tests, no network
 ```
 
 Destructive and spam-producing paths run against a mock transport, so they are

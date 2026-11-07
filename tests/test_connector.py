@@ -734,3 +734,119 @@ def test_bankr_signer_refuses_denylisted_wallet():
 def test_bankr_signer_allows_address_not_on_denylist():
     ok = "0x" + "ab" * 20
     assert c.BankrSigner(address=ok, denylist=("0x" + "de" * 20,)).address == ok
+
+
+# ---------------------------------------------------------- validator module
+from sixty529 import validator as val  # noqa: E402
+
+FEED = {
+    "sequence": 1794058121,
+    "min_supported": "0.1.0-rc.9",
+    "deadline": "2026-11-08T00:00:00Z",
+    "deadline_reason": "chain switch",
+    "releases": [{
+        "version": "0.1.0-rc.10",
+        "files": [
+            {"name": "validator-0.1.0-aarch64-apple-darwin.tar.gz",
+             "size": 43538468, "sha256": "aa" * 32},
+            {"name": "validator-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+             "size": 46277777, "sha256": "bb" * 32},
+        ],
+    }],
+}
+
+
+def test_target_triple_mapping():
+    assert val.target_triple("arm64", "Darwin") == "aarch64-apple-darwin"
+    assert val.target_triple("x86_64", "Linux") == "x86_64-unknown-linux-gnu"
+    assert val.target_triple("aarch64", "Linux") == "aarch64-unknown-linux-gnu"
+    assert val.target_triple("x86_64", "Windows") == "x86_64-pc-windows-msvc"
+
+
+def test_version_ordering_handles_rc():
+    k = val._ver_key
+    assert k("0.1.0-rc.9") < k("0.1.0-rc.10"), "rc.10 is newer than rc.9"
+    assert k("0.1.0-rc.10") < k("0.1.0"), "the real release beats its rc line"
+    assert k("0.1.0") < k("0.2.0")
+
+
+def test_check_release_flags_below_min_supported(monkeypatch):
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.8")
+    st = val.check_release(feed=FEED)
+    assert st.below_min_supported is True
+    assert st.urgent is True
+    assert st.upgrade_available is True
+
+
+def test_check_release_current_is_not_urgent(monkeypatch):
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.10")
+    st = val.check_release(feed=FEED)
+    assert st.below_min_supported is False
+    assert st.upgrade_available is False
+    assert st.deadline == "2026-11-08T00:00:00Z"
+
+
+def test_release_files_unknown_version_raises():
+    with pytest.raises(val.ValidatorError):
+        val.release_files("9.9.9", feed=FEED)
+
+
+def test_download_rejects_checksum_mismatch(monkeypatch, tmp_path):
+    """An unverified build must never be returned to the caller."""
+    class FakeResp:
+        def __init__(self): self._d = [b"not-the-real-bytes", b""]
+        def read(self, n=None): return self._d.pop(0) if self._d else b""
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(val.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    with pytest.raises(val.ValidatorError, match="checksum mismatch"):
+        val.download_release("0.1.0-rc.10", str(tmp_path),
+                             triple="x86_64-unknown-linux-gnu", feed=FEED)
+    assert list(tmp_path.iterdir()) == [], "bad download must be deleted"
+
+
+def test_status_interprets_documented_exit_codes(monkeypatch):
+    import subprocess as sp
+
+    def fake(cmd, **kw):
+        return sp.CompletedProcess(cmd, 5, '{"alerts":[{"level":"AL2"}]}', "")
+    monkeypatch.setattr(val.subprocess, "run", fake)
+    r = val.status()
+    assert r["exit_code"] == 5
+    assert r["healthy"] is False
+    assert r["needs_attention"] is True
+    assert r["alerts"] == [{"level": "AL2"}]
+
+
+def test_status_exit_zero_is_healthy(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(val.subprocess, "run",
+                        lambda cmd, **kw: sp.CompletedProcess(cmd, 0, "{}", ""))
+    r = val.status()
+    assert r["healthy"] is True and r["needs_attention"] is False
+
+
+def test_status_exit_three_is_not_running(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(val.subprocess, "run",
+                        lambda cmd, **kw: sp.CompletedProcess(cmd, 3, "", ""))
+    r = val.status()
+    assert r["needs_attention"] is True and "not running" in r["meaning"]
+
+
+def test_plan_upgrade_is_advice_not_execution(monkeypatch):
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.8")
+    steps = val.plan_upgrade(val.check_release(feed=FEED),
+                             triple="x86_64-unknown-linux-gnu")
+    assert any("verify its SHA-256" in s for s in steps)
+    assert any("systemctl restart" in s for s in steps)
+    assert any("signed a day" in s for s in steps)
+
+
+def test_grant_draft_surfaces_failure(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(val.subprocess, "run",
+                        lambda cmd, **kw: sp.CompletedProcess(cmd, 1, "", "no ref-block"))
+    with pytest.raises(val.ValidatorError, match="ref-block"):
+        val.grant_draft("0xabc", "deadbeef")

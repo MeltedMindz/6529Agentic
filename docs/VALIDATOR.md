@@ -188,3 +188,64 @@ Do not automate the download-and-install end to end just because you can. The
 project chose no auto-updates; an agent that silently installs releases is
 working against that, and a bad upgrade that double-signs costs the account
 permanently.
+
+## Managing it from this repo
+
+`src/sixty529/validator.py` wraps the binary and the feed so an agent can
+monitor and upgrade without a browser.
+
+```bash
+PYTHONPATH=src python3 -m sixty529.cli validator release   # feed vs installed
+PYTHONPATH=src python3 -m sixty529.cli validator status    # local health
+PYTHONPATH=src python3 -m sixty529.cli validator watch     # one verdict, for cron
+PYTHONPATH=src python3 -m sixty529.cli account <handle>    # TDH, REP, cards
+```
+
+`validator watch` exits **0** when healthy and **5** when something needs you —
+local alert, version below `min_supported`, or an approaching deadline — so it
+drops straight into a scheduler.
+
+Two deliberate limits in the code:
+
+- `check_release()` tells you an upgrade is due. It does not install one. The
+  project ships no auto-updates on purpose, and `plan_upgrade()` returns the
+  steps for a supervised run rather than executing them.
+- `download_release()` **refuses to return a path** whose SHA-256 does not
+  match the signed feed, and deletes the bad file. An unverified build is never
+  handed to a caller.
+
+## The grant, headless
+
+`grant sign-page` needs a browser. `grant draft` + `grant import` do not:
+
+```bash
+validator grant draft --account 0xWALLET --key <keycode> --json
+# -> writes grants/<account>-<n>.typed-data.json  (EIP-712 ValidatorGrant)
+```
+
+Sign that typed data with any signer supporting `eth_signTypedData_v4`, then:
+
+```bash
+validator grant import --signature 0x...
+```
+
+The grant is EIP-712 typed data naming **no chain**, so it signs offline, costs
+nothing, and moves no NFTs or funds. The validator must be running first — it
+supplies the recent finalized Ethereum block the draft references.
+
+**Verified caveat:** Bankr's API signs `personal_sign` freely but returns
+`403 Contract calls need MFA` for `eth_signTypedData_v4` until MFA and contract
+calls are enabled in its security settings. Check your signer can do typed data
+*before* planning a headless grant.
+
+## TDH is earned, not granted
+
+A validator's weight is the TDH of the account that grants it, so a grant from
+an account with `tdh: 0` runs correctly and counts for nothing.
+
+TDH accrues **per day of holding** — receiving a card does not grant TDH
+immediately. `sixty529 account <handle>` surfaces this directly: it reports
+`memes_balance` alongside `tdh` and says so when an account holds cards but has
+not accrued yet. Cards are at
+[thememes.exchange](https://thememes.exchange/memes/max-tdh) and
+[the collection on OpenSea](https://opensea.io/collection/thememes6529).
