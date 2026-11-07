@@ -557,6 +557,19 @@ def cmd_respond(args) -> int:
         out({"staged": False, "error": "already_replied_to_this_drop"})
         return 3
 
+    # What do we already know that bears on this? Public, cited context only.
+    prior = None
+    if not args.no_memory:
+        try:
+            from agent6529 import memory as mem_mod
+            mem = mem_mod.Memory()
+            prior = mem_mod.context_for_reply(
+                mem, c.SixtyFiveClient.drop_text(parent),
+                (parent.get("author") or {}).get("handle"), wid)
+            mem.close()
+        except Exception as e:                       # memory is never fatal
+            prior = {"unavailable": str(e)[:120]}
+
     part_no = args.reply_part
     cdid = pub.stage_drop(store, wid, args.content,
                           reply_to={"drop_id": args.drop_id,
@@ -572,6 +585,7 @@ def cmd_respond(args) -> int:
         "reply_to": args.drop_id,
         "would_publish": decision.allowed,
         "blocking_reasons": decision.reasons,
+        "prior_context": prior,
         "next": f"6529 publish {cdid}" if decision.allowed else None,
     })
     return 0
@@ -744,6 +758,81 @@ def cmd_profile(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- memory
+def cmd_learn(args) -> int:
+    """Ingest allowlisted Waves into memory, then distil with a local model."""
+    from agent6529 import memory as mem_mod
+
+    cfg = pol.load_config()
+    api = build_api(cfg)
+    mem = mem_mod.Memory()
+    observed = dup = 0
+
+    for entry in cfg.get("waves", []):
+        wid = entry.get("id")
+        if not wid:
+            continue
+        try:
+            feed = api.wave_drops(wid, limit=args.limit)
+        except c.SixtyFiveError as e:
+            out({"error": f"wave {wid}: {e}"})
+            continue
+        for d in pub._iter_drops(feed):
+            ctx = pol.build_public_context(d, {"id": wid, "name": entry.get("name")})
+            ok = mem.observe(
+                drop_id=d.get("id"),
+                content=ctx.get("content") or "",
+                author=ctx.get("author_handle"),
+                wave_id=wid,
+                wave_name=entry.get("name"),
+                created_at=d.get("created_at"),
+                suspicious=ctx["_injection_scan"]["suspicious"],
+            )
+            observed += 1 if ok else 0
+            dup += 0 if ok else 1
+
+    learned = ({"skipped": "use --distil to run the local model"}
+               if not args.distil
+               else mem.learn_batch(limit=args.distil_limit))
+    result = {"observed_new": observed, "already_known": dup, "learned": learned,
+              "stats": mem.stats()}
+    mem.close()
+    out(result)
+    return 0
+
+
+def cmd_recall(args) -> int:
+    """What does this agent know that is relevant to a question."""
+    from agent6529 import memory as mem_mod
+
+    mem = mem_mod.Memory()
+    try:
+        if args.about:
+            hits = mem.about(args.about, k=args.limit)
+        else:
+            if not args.query:
+                raise SystemExit("need a query, or --about <handle>")
+            hits = mem.recall(args.query, k=args.limit, author=args.author,
+                              wave_id=args.wave)
+        out({"query": args.query or f"about:{args.about}",
+             "hits": len(hits),
+             "results": [h.as_dict() for h in hits]})
+    finally:
+        mem.close()
+    return 0
+
+
+def cmd_memory(args) -> int:
+    from agent6529 import memory as mem_mod
+
+    mem = mem_mod.Memory()
+    try:
+        out(mem.stats())
+    finally:
+        mem.close()
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="6529",
                                 description="Axiom 6529.io connector")
@@ -811,6 +900,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("drop_id")
     sp.add_argument("--content", required=True)
     sp.add_argument("--reply-part", type=int, default=1)
+    sp.add_argument("--no-memory", action="store_true",
+                    help="skip recall of prior public context")
     sp.set_defaults(fn=cmd_respond)
 
     sp = sub.add_parser("profile", help="create or update your 6529 profile")
@@ -835,6 +926,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("action", choices=["status", "release", "watch"])
     sp.add_argument("--data-dir", default=None)
     sp.set_defaults(fn=cmd_validator)
+
+    sp = sub.add_parser("learn", help="ingest Waves into memory and distil them")
+    sp.add_argument("--limit", type=int, default=20, help="drops per wave")
+    sp.add_argument("--distil", action="store_true",
+                    help="run the local model to extract claims")
+    sp.add_argument("--distil-limit", type=int, default=25)
+    sp.set_defaults(fn=cmd_learn)
+
+    sp = sub.add_parser("recall", help="what do I know about this")
+    sp.add_argument("query", nargs="?", default=None)
+    sp.add_argument("--about", default=None, metavar="HANDLE")
+    sp.add_argument("--author", default=None)
+    sp.add_argument("--wave", default=None)
+    sp.add_argument("--limit", type=int, default=5)
+    sp.set_defaults(fn=cmd_recall)
+
+    sp = sub.add_parser("memory", help="memory statistics")
+    sp.set_defaults(fn=cmd_memory)
 
     sp = sub.add_parser("ingest")
     sp.add_argument("--limit", type=int, default=20)
