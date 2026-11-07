@@ -1,139 +1,190 @@
 # Running a 6529 validator
 
-Notes from a live inspection on **2026-11-07**. Treat version numbers and dates
-as a snapshot — re-check <https://6529.io/validator> before acting.
+Verified **2026-11-07** against release `0.1.0-rc.10`, by downloading the Linux
+x86-64 build, checking its SHA-256 against the signed release feed, and reading
+the install guide shipped inside it (`docs/install/linux.md`,
+`docs/install/operations.md`).
+
+> **Correction.** An earlier version of this file said the validator was a
+> desktop-only app with "no verified unattended install path". That was wrong.
+> It ships as a **standalone CLI binary with a built-in systemd installer** and
+> explicit support for headless servers and Raspberry Pis. Everything below is
+> from the official docs in the release, not inferred.
 
 ## What it is
 
-> *"It runs on your computer, computes each day's TDH from Ethereum and signs
-> it."* — 6529.io/validator
+Once a day it computes everyone's TDH (TDH v1.4) from Ethereum and signs the
+result with a key held on that machine.
 
-TDH (Total Days Held) is 6529's holder-weighting metric. The validator
-independently recomputes it from Ethereum rather than trusting the API, then
-signs the result. Consensus is reached when accounts holding more than **2/3 of
-validating TDH** run a current release and have signed.
+Two things worth knowing up front, both stated by the project:
 
-This is a *verification* role, not a blockchain node and not a mining role. It
-does not require holding anything to run, but your signature only carries
-weight proportional to the TDH of the accounts you control.
+- **The validator key cannot move NFTs or funds.** It only signs TDH results.
+- **Tor is on by default**, so Ethereum servers and other validators do not see
+  your address.
 
-## Current release
+Apache-2.0. The binary is `validator`; run `validator --help`.
 
-As of 2026-11-07 the download page advertises **0.1.0-rc.10**, a desktop
-application:
+## The signed release feed — the automation surface
 
-| platform | requirement | size |
+`https://6529.io/validator/releases.json` (+ `releases.json.sig`)
+
+This is the piece that makes agent-operated validators tractable. Verified live:
+
+| field | value on 2026-11-07 | use |
 |---|---|---|
-| macOS | 11 or newer, Apple silicon or Intel | 89.4 MB |
-| Windows | 10 or 11, 64-bit | 36.3 MB |
-| Linux x86-64 | Ubuntu 22.04 / Debian 12 or newer | 29.4 MB |
-| **Linux ARM64** | **Raspberry Pi 4/5, other ARM64** | **27.2 MB** |
-| Linux AppImage | other desktops, *runs only while open* | 43.2 MB |
+| `sequence` | `1794058121` | change detection |
+| `min_supported` | `0.1.0-rc.9` | **alert when your version drops below this** |
+| `deadline` | `2026-11-08T00:00:00Z` | hard consensus cutover |
+| `deadline_reason` | *"signed TDH counts only on the new chain…"* | why |
+| `releases[].files[]` | `name`, `size`, `sha256` | verify before running |
+| `checkpoints`, `beacon_checkpoint` | chain anchors | — |
 
-There was a scheduled consensus change on **Sunday 8 November 2026, 00:00 UTC**,
-after which signed TDH counts only on the new chain. rc.9 and rc.10 both handle
-it; rc.8 and older had to update first. That pattern — a dated switch requiring
-a minimum release — is the thing to watch for operationally.
+The validator reads this itself once an hour, through Tor, and checks the
+signature with 6529's key built into every release. Other validators relay the
+same signed list, so you still hear about a release when 6529.io is unreachable.
 
-## Why this is awkward for an agent, honestly
+**Nothing is ever downloaded or installed for you.** There are no automatic
+updates by design (P36) — you decide, after reading the notes.
 
-The validator ships as a **desktop app**, not a daemon or container. The
-download page is JavaScript-rendered and exposes no direct artifact URLs to
-scrape, and there is no published package repository, Docker image, or
-`validator --headless` flag that I could verify.
+Artifacts live at a predictable path:
 
-Two adjacent repositories exist under
-[6529-Collections](https://github.com/6529-Collections) but **neither is the
-validator**, and both are stale relative to rc.10:
+```
+https://6529.io/validator/download/<version>/<filename>
+```
 
-| repo | language | last updated |
-|---|---|---|
-| `6529-Prenode` | TypeScript | 2025-07-02 |
-| `6529node` | Go | 2025-03-07 |
+e.g. `…/download/0.1.0-rc.10/validator-0.1.0-x86_64-unknown-linux-gnu.tar.gz`
+(46,277,777 bytes, sha256 `7ed3affa…4f33c1` — matched the feed exactly).
 
-So: there is no verified fully-unattended install path today. Anyone claiming
-otherwise should be asked for the artifact URL.
+Builds available: `x86_64`/`aarch64` Linux tarballs, `.deb` (amd64, arm64),
+`.dmg`, `.msi`, `.exe`, `.AppImage`, plus macOS/Windows tarballs and
+`SHA256SUMS`.
 
-## The practical path for an agent-operated validator
+## Install, headless
 
-The Linux x86-64 and ARM64 builds are ordinary desktop binaries, which is what
-makes this tractable. A Raspberry Pi 4/5 at 27.2 MB is the cheapest honest
-option.
+Requires 64-bit Linux, **glibc 2.35+** (Ubuntu 22.04, Debian 12/13, Raspberry
+Pi OS 64-bit Bookworm/Trixie, Fedora 36+), systemd, `sudo`, `curl`. Check with
+`ldd --version | head -1`. Over SSH is explicitly fine.
 
-1. **Dedicated host.** A small always-on Linux box or Pi. The validator must be
-   running to sign each day, and the AppImage variant explicitly *"runs only
-   while open"* — prefer the `.deb`-style build over the AppImage for anything
-   unattended.
+```bash
+VERSION=0.1.0
+TARGET=$([ "$(uname -m)" = aarch64 ] && echo aarch64-unknown-linux-gnu \
+                                     || echo x86_64-unknown-linux-gnu)
+REL=0.1.0-rc.10          # read this from releases.json, do not hardcode
+BASE=https://6529.io/validator/download/$REL
 
-2. **A real session.** Desktop builds generally expect a display. On a headless
-   box, run it under a virtual one:
+mkdir -p ~/validator-download && cd ~/validator-download
+curl -fL -O "$BASE/validator-$VERSION-$TARGET.tar.gz"
+curl -fL -O "$BASE/SHA256SUMS"
 
-   ```bash
-   sudo apt install -y xvfb
-   xvfb-run -a /path/to/6529-validator
-   ```
+# Never run an unverified build.
+grep " validator-$VERSION-$TARGET.tar.gz\$" SHA256SUMS | sha256sum -c -
 
-   Verify it actually signs under `xvfb` before trusting it — a GUI app can
-   start cleanly and still not complete work without a compositor.
+tar -xzf "validator-$VERSION-$TARGET.tar.gz"
+sudo mkdir -p /opt/6529-validator
+sudo cp -R "validator-$VERSION-$TARGET" /opt/6529-validator/
+sudo ln -sfn "/opt/6529-validator/validator-$VERSION-$TARGET/validator" \
+             /usr/local/bin/validator
+validator --version
+```
 
-3. **Supervise it, don't babysit it.** A `systemd` user unit with
-   `Restart=always` is the right shape:
+The symlink is the upgrade seam: a new version only moves that pointer.
 
-   ```ini
-   [Unit]
-   Description=6529 Validator
-   After=network-online.target
+### Let the binary install its own service
 
-   [Service]
-   ExecStart=/usr/bin/xvfb-run -a /opt/6529/validator
-   Restart=always
-   RestartSec=30
+```bash
+sudo validator service install --dry-run   # see every change first
+sudo validator service install
+```
 
-   [Install]
-   WantedBy=default.target
-   ```
+That creates the `validator6529` account (cannot log in), the data directory
+`/var/lib/6529-validator` readable only by it, and a systemd unit
+`6529-validator` locked down to the network and that directory. It does **not**
+start yet — the data directory is empty.
 
-   ```bash
-   systemctl --user enable --now 6529-validator
-   loginctl enable-linger "$USER"   # survive logout
-   ```
+```bash
+sudo -u validator6529 validator init   --data-dir /var/lib/6529-validator
+sudo -u validator6529 validator keygen --data-dir /var/lib/6529-validator \
+     --label "closet pi"
+sudo validator service install     # now enables and starts it
+sudo validator service status      # expect: running
+journalctl -u 6529-validator -f
+```
 
-   `enable-linger` matters: without it a user service dies with the login
-   session — the same failure mode that silently takes down agent runtimes.
+`keygen` prints an 8-character key code. Your wallet shows the same 8
+characters when it signs the grant — check they match. The key never leaves the
+machine.
 
-4. **Monitor the thing that actually degrades.** Not "is the process up" — a
-   validator that is running but has not signed today is indistinguishable from
-   a healthy one unless you check signing. Assert on **last successful signature
-   date**, and alert when it falls behind by a day. A liveness check alone is
-   not coverage.
+### Authorize the key (the one step needing a wallet)
 
-5. **Watch for release deadlines.** Consensus switches have hard dates. Track
-   the releases page and alert on a new minimum version, rather than discovering
-   it after your signature stopped counting.
+```bash
+sudo -u validator6529 validator grant sign-page \
+     --data-dir /var/lib/6529-validator \
+     --account 0xYOUR_WALLET --bind 127.0.0.1:6530 --no-open
+```
 
-## Key handling
+It prints a **one-time** link including `?token=…`. Open that whole link in a
+browser with your wallet. The bare address will not sign. On a headless box,
+SSH-tunnel to it and open the link locally. Run the command again for a new
+link.
 
-The validator signs with a key tied to the accounts whose TDH you are
-attesting. Same rules as everywhere else in this repo:
+## Monitoring — use the documented contract, not liveness
 
-- never put that key on a cloud host, in an environment variable on a
-  third-party platform, or in a repository
-- prefer a dedicated key that holds nothing beyond what it attests
-- if a key has ever been exposed, rotate before using it for anything
-  identity-bearing
+`validator status` has defined exit codes:
 
-## Open questions worth asking 6529 directly
+| exit | meaning |
+|---|---|
+| `0` | running, nothing needs you (including waiting for the day's data) |
+| `5` | running, **something needs you** — an open AL1/AL2/AL3 alert, or a key/authorization still to make |
+| `3` | not running (prints the last snapshot it wrote) |
 
-Rather than guessing, these are the things that would make agent-run validators
-genuinely easy, and none are answered publicly as of 2026-11-07:
+```bash
+validator status --json | jq .alerts
+```
 
-- Is there a supported headless or CLI mode?
-- Are there stable, scriptable artifact URLs (or a package repo) for the Linux
-  builds?
-- Is there a machine-readable endpoint for "current minimum release" so a
-  monitor can alert before a consensus switch?
-- Is there a documented way to query whether a given account signed on a given
-  day?
+Alert levels: **AL1** needs you now, **AL2** today, **AL3** worth a look, **AL4**
+information (DEBUG log only).
 
-If you get answers, this document should be updated with them rather than
-inferred around.
+A process-liveness check is not coverage here — exit `5` means the process is
+healthy *and* not counting. Alert on **non-zero**, and separately on
+`min_supported` from the feed moving past your installed version.
+
+Common states: `WAITING_FINALITY` (normal, clears ~00:15 UTC), `WAITING_SOURCE`
+(no Ethereum server answering), `WAITING_HISTORY` (no certified day yet),
+`CLOCK` (system clock off by >1 min), `NOT_GRANTED` (no grant for this key).
+
+`EXCLUDED` / `KEY_EXCLUDED` is the one to avoid: it means a **double vote** —
+the same key ran on two machines, or was stolen. The excluded grant's keys
+*never count for that account again*. Hence the rule in the README: keep the
+data folder on one computer, never copy it. On a new machine, install fresh.
+
+## Deadlines are real
+
+- **2026-11-08 00:00 UTC** — signed TDH counts only on the new chain; needs
+  rc.9 or rc.10.
+- **2026-12-01** — *"Release 0.1.0 must be upgraded before 2026-12-01."* It
+  checks Ethereum blocks only up to that date, ahead of Ethereum's next upgrade
+  changing block headers. A validator still on 0.1.0 after that **stops signing**.
+
+Poll `min_supported` and `deadline` from `releases.json` and alert ahead of
+them. Keep the previous version's folder until the new one has signed a day, so
+you can roll back.
+
+## For an agent operator
+
+The honest shape of this: everything except the wallet grant is scriptable, and
+the project deliberately keeps installation a human decision.
+
+1. Dedicated always-on box. A Raspberry Pi 4/5 is explicitly supported; the
+   ARM64 tarball is 45 MB.
+2. Install and grant once, by hand. The grant needs a wallet signature.
+3. Poll `releases.json` on a schedule. Alert on `sequence` change,
+   `min_supported` above your version, or an approaching `deadline`.
+4. Poll `validator status` and alert on exit `5` or `3`.
+5. Upgrade deliberately: verify SHA-256 against the feed, move the symlink,
+   restart, confirm it signs a day, then retire the old folder.
+6. Never copy the data directory to a second machine.
+
+Do not automate the download-and-install end to end just because you can. The
+project chose no auto-updates; an agent that silently installs releases is
+working against that, and a bad upgrade that double-signs costs the account
+permanently.
