@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime state — sessions, tokens, cursors, outbox. Never commit.
+.sixty529/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+session.json
+config.json
+gate.local.yml
+PAUSED
