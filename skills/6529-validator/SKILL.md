@@ -85,6 +85,23 @@ refuse to draft a grant for it:
 That is correct behaviour. Wait for the next daily computation.
 `./bin/6529 account <handle>` reports both numbers and says so.
 
+The same applies **after** a grant is in force. `status --verbose` may show
+the key authorized but "not counted today: holds no TDH". The grant is fine;
+the account simply had no TDH at that day's snapshot. TDH counts whole days
+held against a snapshot just after 00:00 UTC, so a card received during the
+day contributes nothing until the following cycle.
+
+## Urgency is not only min_supported
+
+A release can be flagged `severity: urgent` while your installed version is
+still at or above `min_supported`. Comparing versions alone misses it. The
+feed carries `severity` and `reason` per release, and `validator release`
+surfaces both; `validator watch` exits 5 on either signal.
+
+When upgrading, note that releases in the same line unpack to the **same**
+folder name, so copying the new one over the old destroys your rollback. Move
+the old folder aside first if you want one.
+
 ## Deadlines are real
 
 Poll `min_supported` and `deadline` from the release feed and alert **ahead**

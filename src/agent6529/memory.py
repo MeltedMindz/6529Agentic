@@ -257,9 +257,17 @@ class Memory:
                     model: str = EXTRACT_MODEL) -> Dict[str, Any]:
         rows = self.unlearned(limit)
         notes = 0
+        failed: List[Dict[str, str]] = []
         for r in rows:
-            notes += self.learn_one(r, model=model)
-        return {"observations_processed": len(rows), "notes_created": notes}
+            try:
+                notes += self.learn_one(r, model=model)
+            except MemoryError_ as exc:
+                # Keep the observation pending so a transient local-model
+                # outage can be retried. Continue the bounded batch and make
+                # the failure visible in the run receipt.
+                failed.append({"drop_id": r["drop_id"], "error": str(exc)})
+        return {"observations_processed": len(rows), "notes_created": notes,
+                "failed": failed}
 
     # ---------------- recall ----------------
     def recall(self, query: str, k: int = 5, author: Optional[str] = None,

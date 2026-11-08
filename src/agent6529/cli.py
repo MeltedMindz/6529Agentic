@@ -668,6 +668,11 @@ def cmd_validator(args) -> int:
                 f"version {rel.installed} is below min_supported "
                 f"{rel.min_supported}; it will stop counting"
             )
+        elif rel.severity and rel.urgent:
+            problems.append(
+                f"{rel.severity.upper()} release {rel.latest} available: "
+                f"{(rel.severity_reason or '')[:160]}"
+            )
         elif rel.upgrade_available:
             problems.append(f"upgrade available: {rel.installed} -> {rel.latest}")
         if rel.deadline:
@@ -931,7 +936,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--limit", type=int, default=20, help="drops per wave")
     sp.add_argument("--distil", action="store_true",
                     help="run the local model to extract claims")
-    sp.add_argument("--distil-limit", type=int, default=25)
+    # Keep the default bounded for scheduled/local-model runs; callers can
+    # opt into a larger batch explicitly when they have budget for it.
+    sp.add_argument("--distil-limit", type=int, default=5,
+                    help="observations to distil (default: 5)")
     sp.set_defaults(fn=cmd_learn)
 
     sp = sub.add_parser("recall", help="what do I know about this")

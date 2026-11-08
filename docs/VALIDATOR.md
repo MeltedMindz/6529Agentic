@@ -249,3 +249,59 @@ immediately. `6529 account <handle>` surfaces this directly: it reports
 not accrued yet. Cards are at
 [thememes.exchange](https://thememes.exchange/memes/max-tdh) and
 [the collection on OpenSea](https://opensea.io/collection/thememes6529).
+
+## Two things upgrading teaches you
+
+**1. A release can be urgent while your version is still "supported".**
+
+On 2026-11-08, rc.12 shipped flagged `severity: urgent` — it fixed validators
+joining the new chain for the first time, which could not load the network's
+history. But `min_supported` was still `rc.9`, so a checker that only compares
+versions against `min_supported` reports everything fine while the validator
+itself prints an urgent banner.
+
+The feed carries `severity` and `reason` **per release**. Read both:
+
+```bash
+./bin/6529 validator release   # surfaces severity alongside min_supported
+./bin/6529 validator watch     # exits 5 on either signal
+```
+
+**2. The release folder name does not change between releases.**
+
+Both rc.10 and rc.12 unpack to `validator-0.1.0-<target>`, because the file
+version is `0.1.0` for the whole rc line. Copying the new one into place
+**overwrites the old one**, so the usual "keep the previous folder until the
+new one has signed a day" advice silently does nothing. Rename first if you
+want a real rollback:
+
+```bash
+sudo mv /usr/local/6529-validator/validator-0.1.0-<target> \
+        /usr/local/6529-validator/validator-0.1.0-<target>.rc10
+```
+
+## Why a freshly authorized key may still not sign
+
+A grant can be **in force** and the key still not count. `validator status
+--verbose` is explicit about which input is missing:
+
+```
+key 2ac47d8c: not signed: no authorization listed the key that day
+  authorized by 0xef2c…1c75, but not counted today:
+  0xef2cc7d1… holds no TDH
+```
+
+That is not a broken grant. TDH is counted in **whole days held** against a
+daily snapshot taken just after 00:00 UTC. A card received at 18:23 UTC has
+been held 5.7 hours at the next snapshot, which is zero full days, so the
+account has no TDH and the key has nothing to weight. One more daily cycle
+fixes it.
+
+Check both numbers together:
+
+```bash
+./bin/6529 account <handle>     # tdh alongside memes_balance
+```
+
+`tdh: 0` with `memes_balance: 1` is the expected state on day one, and the
+command says so rather than leaving you to guess.

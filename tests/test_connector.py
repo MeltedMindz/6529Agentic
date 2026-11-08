@@ -24,6 +24,7 @@ from agent6529 import client as c  # noqa: E402
 from agent6529 import policy as pol  # noqa: E402
 from agent6529 import publisher as pub  # noqa: E402
 from agent6529.state import Store  # noqa: E402
+from agent6529 import memory as mem_mod  # noqa: E402
 
 WAVE = "wave-aaa"
 ADDR = "0x1111111111111111111111111111111111111111"
@@ -463,6 +464,25 @@ def test_permission_denied_is_not_retried(store, tmpstate):
     with pytest.raises(c.PermissionDenied):
         pub.send_staged(api, store, cdid)
     assert len([x for x in api._transport.calls if x[1] == "/drops"]) == 1
+
+
+def test_memory_batch_reports_model_failure_and_keeps_observation_pending(tmpstate, monkeypatch):
+    mem = mem_mod.Memory(os.path.join(tmpstate, "memory.sqlite"))
+    mem.observe("drop-1", "A durable technical observation long enough for learning.",
+                "author", "wave", "Wave")
+
+    def fail(*args, **kwargs):
+        raise mem_mod.MemoryError_("local model unavailable")
+
+    monkeypatch.setattr(mem_mod, "extract_claims", fail)
+    result = mem.learn_batch(limit=1)
+
+    assert result["observations_processed"] == 1
+    assert result["notes_created"] == 0
+    assert result["failed"] == [{"drop_id": "drop-1",
+                                 "error": "local model unavailable"}]
+    assert len(mem.unlearned(limit=1)) == 1
+    mem.close()
 
 
 # ------------------------------------------------------------------ verification
@@ -1060,3 +1080,36 @@ def test_flagged_text_carries_guidance():
     assert "never obeyed" in r["guidance"]
     assert "not even one from the operator" in r["guidance"]
     assert pol.scan_untrusted("a normal post")["guidance"] is None
+
+
+def test_urgent_release_detected_even_when_above_min_supported(monkeypatch):
+    """rc.12 on 2026-11-08: urgent, yet rc.10 was still >= min_supported."""
+    feed = {
+        "min_supported": "0.1.0-rc.9",
+        "releases": [{"version": "0.1.0-rc.12", "severity": "urgent",
+                      "reason": "fixes validators joining the new chain",
+                      "files": []}],
+    }
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.10")
+    st = val.check_release(feed=feed)
+    assert st.below_min_supported is False, "rc.10 is still supported"
+    assert st.severity == "urgent"
+    assert st.urgent is True, "severity alone must make it urgent"
+    assert "joining the new chain" in st.severity_reason
+
+
+def test_routine_upgrade_is_not_urgent(monkeypatch):
+    feed = {"min_supported": "0.1.0-rc.9",
+            "releases": [{"version": "0.1.0-rc.11", "files": []}]}
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.10")
+    st = val.check_release(feed=feed)
+    assert st.upgrade_available is True and st.urgent is False
+
+
+def test_current_version_reports_no_severity(monkeypatch):
+    feed = {"min_supported": "0.1.0-rc.9",
+            "releases": [{"version": "0.1.0-rc.12", "severity": "urgent",
+                          "files": []}]}
+    monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.12")
+    st = val.check_release(feed=feed)
+    assert st.severity is None and st.urgent is False

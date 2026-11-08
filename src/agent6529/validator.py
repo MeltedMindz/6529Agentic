@@ -111,13 +111,25 @@ class ReleaseStatus:
     sequence: Optional[int]
     upgrade_available: bool
     below_min_supported: bool
+    # Per-release urgency. A release can be urgent while the installed version
+    # is still at or above min_supported, so comparing versions alone misses
+    # it - which is exactly what happened with rc.12 on 2026-11-08.
+    severity: Optional[str] = None
+    severity_reason: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
 
     @property
     def urgent(self) -> bool:
-        return self.below_min_supported
+        """Urgent means act now, from either signal.
+
+        Below min_supported stops signatures counting. A release flagged
+        urgent/critical can matter just as much while the installed version is
+        still technically supported.
+        """
+        sev = (self.severity or "").lower()
+        return self.below_min_supported or sev in ("urgent", "critical", "high")
 
 
 def check_release(binary: str = VALIDATOR_BIN,
@@ -131,11 +143,19 @@ def check_release(binary: str = VALIDATOR_BIN,
 
     upgrade = bool(inst and latest and _ver_key(inst) < _ver_key(latest))
     below = bool(inst and minsup and _ver_key(inst) < _ver_key(minsup))
+
+    # Carry the newest release's own severity when we are not yet on it.
+    sev = sev_reason = None
+    if rels and upgrade:
+        sev = rels[0].get("severity")
+        sev_reason = rels[0].get("reason") or rels[0].get("notes")
+
     return ReleaseStatus(
         installed=inst, latest=latest, min_supported=minsup,
         deadline=d.get("deadline"), deadline_reason=d.get("deadline_reason"),
         sequence=d.get("sequence"),
         upgrade_available=upgrade, below_min_supported=below,
+        severity=sev, severity_reason=sev_reason,
     )
 
 
