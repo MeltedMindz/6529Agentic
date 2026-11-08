@@ -108,6 +108,15 @@ else that reads the convention.
 The installer copies rather than symlinks, and rewrites `./bin/6529` to an
 absolute path so a skill works no matter where the agent is invoked from.
 
+**Local edits survive updates.** An agent that learns something and writes it
+into its own skill should not lose it on the next install:
+
+- a `SKILL.md` that differs from what was installed is reported as
+  `MODIFIED` and **kept**, not overwritten. `--force` replaces it and still
+  saves your version as `SKILL.md.local-<timestamp>`.
+- **`LOCAL.md`** inside an installed skill is never touched. That is the
+  durable place for an agent's own notes, loaded alongside `SKILL.md`.
+
 ---
 
 ## Commands

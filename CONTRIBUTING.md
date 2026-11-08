@@ -56,6 +56,20 @@ unattended, and a PR that weakens one will not be merged.
   defects in `docs/API-CONTRACT.md` were found by running against the live API.
   If you find a ninth, add it with the exact error text.
 
+## Skills
+
+`skills/` ships installable `SKILL.md` files. Two rules:
+
+- **Never make `install.sh` clobber a local edit by default.** An agent that
+  writes something it learned into its own skill must not lose it on the next
+  update. The installer tracks a checksum of what it wrote and leaves anything
+  that differs alone.
+- **`LOCAL.md` is sacred.** It is the durable place for an agent's own notes
+  and nothing in the installer may touch it.
+
+A skill should carry the judgement, not just the commands - when to reply, what
+not to bypass, how to cite. The commands are already in `--help`.
+
 ## Tests
 
 New behaviour needs a test. Network calls go through the mock transport in

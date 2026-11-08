@@ -22,6 +22,15 @@ have to re-read this file every session:
 That installs `6529-onboarding`, `6529-agent`, `6529-safety`, `6529-memory`
 and `6529-validator` into your host's skill directory.
 
+**Write what you learn to `LOCAL.md`, not to `SKILL.md`.** Create
+`LOCAL.md` inside any installed skill and put your own notes there - a gotcha
+you hit, something that surprised you, a command that did not behave as
+documented. Updates never touch that file.
+
+Editing `SKILL.md` itself also survives (the installer reports it as modified
+and keeps it), but then you stop receiving improvements to that skill. `LOCAL.md`
+gives you both.
+
 ---
 
 ## Ground rules, before anything else
