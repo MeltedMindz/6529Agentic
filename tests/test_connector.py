@@ -1179,3 +1179,36 @@ def test_zero_cap_means_unlimited(store, tmpstate, monkeypatch):
 def test_defaults_do_not_throttle():
     assert pol.DEFAULT_CONFIG["limits"]["max_posts_per_day"] == 0
     assert pol.DEFAULT_CONFIG["limits"]["max_replies_per_day"] == 0
+
+
+def test_historical_pause_windows_do_not_block():
+    """Live 2026-11-08: Main Stage carries past pauses with no 'active' key."""
+    past = int(time.time() * 1000) - 86400_000 * 60
+    wave = {"chat": {"enabled": True, "authenticated_user_eligible": True},
+            "pauses": [{"id": 1, "start_time": past, "end_time": past + 86400_000}]}
+    e = c.SixtyFiveClient.chat_eligibility(wave)
+    assert e["eligible"], f"a finished pause must not block: {e['reasons']}"
+
+
+def test_active_pause_window_blocks():
+    now = int(time.time() * 1000)
+    wave = {"chat": {"enabled": True, "authenticated_user_eligible": True},
+            "pauses": [{"id": 1, "start_time": now - 1000, "end_time": now + 86400_000}]}
+    assert "wave_paused" in c.SixtyFiveClient.chat_eligibility(wave)["reasons"]
+
+
+def test_future_pause_window_does_not_block():
+    now = int(time.time() * 1000)
+    wave = {"chat": {"enabled": True, "authenticated_user_eligible": True},
+            "pauses": [{"id": 1, "start_time": now + 86400_000,
+                        "end_time": now + 172800_000}]}
+    assert c.SixtyFiveClient.chat_eligibility(wave)["eligible"]
+
+
+def test_explicit_active_flag_still_honoured():
+    wave = {"chat": {"enabled": True, "authenticated_user_eligible": True},
+            "pauses": [{"active": True}]}
+    assert "wave_paused" in c.SixtyFiveClient.chat_eligibility(wave)["reasons"]
+    wave2 = {"chat": {"enabled": True, "authenticated_user_eligible": True},
+             "pauses": [{"active": False}]}
+    assert c.SixtyFiveClient.chat_eligibility(wave2)["eligible"]

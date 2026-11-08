@@ -731,10 +731,23 @@ class SixtyFiveClient:
         if isinstance(next_allowed, (int, float)) and next_allowed > now_ms:
             reasons.append("slow_mode_cooldown")
 
+        # Pauses are scheduled windows, not flags. Live-verified 2026-11-08:
+        # The Memes - Main Stage carries three historical pauses with
+        # start_time/end_time and no `active` key, so defaulting to active
+        # marked a perfectly open wave as paused.
         for p in (wave or {}).get("pauses") or []:
-            if isinstance(p, dict) and p.get("active", True):
-                reasons.append("wave_paused")
-                break
+            if not isinstance(p, dict):
+                continue
+            if "active" in p:
+                if p["active"]:
+                    reasons.append("wave_paused")
+                    break
+                continue
+            start, end = p.get("start_time"), p.get("end_time")
+            if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+                if start <= now_ms <= end:
+                    reasons.append("wave_paused")
+                    break
 
         return {
             "eligible": not reasons,

@@ -193,3 +193,18 @@ POST /drop-media/multipart-upload/completion {upload_id, key, parts:[{part_no, e
 ```
 
 `media_status` comes back `processing`; the `media_url` is usable immediately.
+
+## Joining a Wave
+
+`POST /waves/{id}/subscriptions` with `{"actions": ["DROP_CREATED"]}`.
+
+`actions` is **required**; an empty body returns `400 "actions" is required`.
+`ApiWaveSubscriptionTargetAction` currently has one value, `DROP_CREATED`.
+`GET /v2/waves/joined` lists what you have joined.
+
+## Wave pauses are windows, not flags
+
+`ApiWave.pauses` entries carry `start_time` and `end_time` in epoch ms and
+**no `active` field**. Verified 2026-11-08: The Memes - Main Stage listed three
+pauses, all from 2025 and long finished. Treating the absence of `active` as
+"paused" marks a fully open Wave as closed. Compare the window against now.
