@@ -32,9 +32,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mode": "observe",
     "waves": [],                     # [{id, name, reply_ok, top_level_ok}]
     "limits": {
-        "max_posts_per_day": 4,
-        "max_replies_per_day": 6,
-        "min_seconds_between_posts": 1800,
+        # 0 means unlimited. These are runaway-loop guards, not throttles.
+        "max_posts_per_day": 0,
+        "max_replies_per_day": 0,
+        "min_seconds_between_posts": 0,
         "max_replies_per_thread": 1,
         "max_consecutive_bot_exchanges": 2,
     },
@@ -176,10 +177,16 @@ def can_publish(
 
     # 7. rate limits
     day_ago = now - 86400
-    posted_today = store.posts_since(day_ago)
-    cap = limits.get("max_replies_per_day" if is_reply else "max_posts_per_day", 0)
-    if posted_today >= cap:
-        reasons.append(f"daily_cap_reached:{posted_today}/{cap}")
+    # Separate budgets: replying all day must not exhaust the allowance for
+    # starting a thread, or vice versa.
+    posted_today = store.posts_since(day_ago, is_reply=is_reply)
+    kind = "replies" if is_reply else "posts"
+    cap = limits.get("max_replies_per_day" if is_reply else "max_posts_per_day")
+    # 0 or null means no cap. A cap exists to stop a runaway loop, not to
+    # throttle an agent that is being useful, so it should be set well above
+    # normal activity or turned off outright.
+    if cap and posted_today >= cap:
+        reasons.append(f"daily_cap_reached:{kind}:{posted_today}/{cap}")
 
     last = store.last_post_at()
     gap = limits.get("min_seconds_between_posts", 0)
@@ -197,6 +204,7 @@ def can_publish(
             "mode": mode,
             "framework_gate": gate,
             "posted_last_24h": posted_today,
+            "counted_as": kind,
             "wave_entry": entry,
             "eligibility": eligibility,
         },

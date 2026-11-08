@@ -214,10 +214,27 @@ class Store:
             is not None
         )
 
-    def posts_since(self, since_epoch: int) -> int:
+    def posts_since(self, since_epoch: int,
+                    is_reply: Optional[bool] = None) -> int:
+        """Count published drops since a time.
+
+        `is_reply` separates the two budgets. They are configured as distinct
+        caps (max_posts_per_day vs max_replies_per_day), so counting them
+        together means a day of replying silently consumes the budget for
+        starting a thread. Reply-ness comes from the outbox row that produced
+        the post.
+        """
+        if is_reply is None:
+            r = self.db.execute(
+                "SELECT COUNT(*) c FROM post_log WHERE posted_at>=?",
+                (since_epoch,)).fetchone()
+            return int(r["c"]) if r else 0
+        op = "IS NOT NULL" if is_reply else "IS NULL"
         r = self.db.execute(
-            "SELECT COUNT(*) c FROM post_log WHERE posted_at>=?", (since_epoch,)
-        ).fetchone()
+            f"SELECT COUNT(*) c FROM post_log p "
+            f"LEFT JOIN outbox o ON o.client_drop_id = p.client_drop_id "
+            f"WHERE p.posted_at>=? AND o.reply_to_id {op}",
+            (since_epoch,)).fetchone()
         return int(r["c"]) if r else 0
 
     def last_post_at(self, wave_id: Optional[str] = None) -> Optional[int]:

@@ -1113,3 +1113,69 @@ def test_current_version_reports_no_severity(monkeypatch):
     monkeypatch.setattr(val, "installed_version", lambda b=None: "0.1.0-rc.12")
     st = val.check_release(feed=feed)
     assert st.severity is None and st.urgent is False
+
+
+def test_reply_and_post_budgets_are_separate(store, tmpstate, monkeypatch):
+    """Replying all day must not consume the budget for starting a thread."""
+    monkeypatch.setattr(pol, "framework_posting_gate",
+                        lambda: {"gate_found": True, "public_posts_enabled": True,
+                                 "source": "test"})
+    cfg = live_cfg()
+    cfg["limits"]["max_posts_per_day"] = 2
+    cfg["limits"]["max_replies_per_day"] = 4
+    cfg["limits"]["min_seconds_between_posts"] = 0
+    now = int(time.time())
+
+    # two replies published today
+    for i in range(2):
+        p = c.SixtyFiveClient.build_chat_drop(
+            WAVE, f"r{i}", f"cid-r{i}",
+            reply_to={"drop_id": f"parent-{i}", "drop_part_id": 1})
+        store.create_action(WAVE, p, reply_to_id=f"parent-{i}")
+        store.mark_verified(f"cid-r{i}", f"srv-r{i}", WAVE)
+
+    assert store.posts_since(now - 86400, is_reply=True) == 2
+    assert store.posts_since(now - 86400, is_reply=False) == 0
+
+    d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE, "a new thread")
+    assert d.allowed, f"top-level blocked by replies: {d.reasons}"
+
+    d2 = pol.can_publish(cfg, store, WAVE, True, ELIGIBLE, "another reply",
+                         parent_drop_id="parent-new")
+    assert d2.allowed, f"replies blocked early: {d2.reasons}"
+
+
+def test_each_budget_still_enforced(store, tmpstate, monkeypatch):
+    monkeypatch.setattr(pol, "framework_posting_gate",
+                        lambda: {"gate_found": True, "public_posts_enabled": True,
+                                 "source": "test"})
+    cfg = live_cfg()
+    cfg["limits"]["max_posts_per_day"] = 1
+    cfg["limits"]["min_seconds_between_posts"] = 0
+    p = c.SixtyFiveClient.build_chat_drop(WAVE, "top", "cid-top")
+    store.create_action(WAVE, p)                      # no reply_to_id
+    store.mark_verified("cid-top", "srv-top", WAVE)
+
+    d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE, "second thread")
+    assert not d.allowed
+    assert any("daily_cap_reached:posts" in r for r in d.reasons)
+
+
+def test_zero_cap_means_unlimited(store, tmpstate, monkeypatch):
+    monkeypatch.setattr(pol, "framework_posting_gate",
+                        lambda: {"gate_found": True, "public_posts_enabled": True,
+                                 "source": "test"})
+    cfg = live_cfg()
+    cfg["limits"]["max_posts_per_day"] = 0
+    cfg["limits"]["min_seconds_between_posts"] = 0
+    for i in range(12):
+        p = c.SixtyFiveClient.build_chat_drop(WAVE, f"t{i}", f"cid-t{i}")
+        store.create_action(WAVE, p)
+        store.mark_verified(f"cid-t{i}", f"srv-t{i}", WAVE)
+    d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE, "another")
+    assert d.allowed, f"0 should mean unlimited: {d.reasons}"
+
+
+def test_defaults_do_not_throttle():
+    assert pol.DEFAULT_CONFIG["limits"]["max_posts_per_day"] == 0
+    assert pol.DEFAULT_CONFIG["limits"]["max_replies_per_day"] == 0
