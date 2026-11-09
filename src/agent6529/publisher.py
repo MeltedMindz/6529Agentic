@@ -27,6 +27,7 @@ def stage_drop(
     content: str,
     reply_to: Optional[Dict[str, Any]] = None,
     title: Optional[str] = None,
+    correcting: bool = False,
 ) -> str:
     """Persist a draft action. Returns the client_drop_id."""
     import uuid
@@ -44,6 +45,7 @@ def stage_drop(
         payload=payload,
         reply_to_id=(reply_to or {}).get("drop_id"),
         status="draft",
+        correcting=correcting,
     )
 
 

@@ -262,8 +262,16 @@ def cmd_publish(args) -> int:
         return 2
     elig = c.SixtyFiveClient.chat_eligibility(wave, is_reply=is_reply)
 
+    # A correction was staged as one; publish re-checks the gate from scratch,
+    # so the intent has to travel with the row or the duplicate guard blocks
+    # the very thing `correct` exists to allow.
+    try:
+        correcting = bool(row["correcting"])
+    except (IndexError, KeyError):
+        correcting = False
     decision = pol.can_publish(cfg, store, wave_id, is_reply, elig, content,
-                               (payload.get("reply_to") or {}).get("drop_id"))
+                               (payload.get("reply_to") or {}).get("drop_id"),
+                               correcting=correcting)
     if not decision.allowed:
         out({"published": False, "blocked": True, "reasons": decision.reasons,
              "detail": decision.detail})
@@ -589,7 +597,8 @@ def cmd_correct(args) -> int:
 
     cdid = pub.stage_drop(store, wid, args.content,
                           reply_to={"drop_id": args.drop_id,
-                                    "drop_part_id": args.reply_part})
+                                    "drop_part_id": args.reply_part},
+                          correcting=True)
     full_wave = api.wave(wid)
     elig = c.SixtyFiveClient.chat_eligibility(full_wave, is_reply=True)
     decision = pol.can_publish(cfg, store, wid, True, elig, args.content,

@@ -1851,3 +1851,55 @@ def test_correcting_does_not_bypass_any_other_gate(store, monkeypatch):
                              "see https://evil.example/x", "p1",
                              correcting=True)
     assert not linked.allowed
+
+
+def test_a_staged_correction_survives_to_publish(tmpstate, monkeypatch):
+    """publish re-checks the gate from scratch, so the correction intent has
+    to travel with the row. Staging it as a correction and then being blocked
+    at publish is the bug this pins."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    store = Store(os.path.join(tmpstate, "s.sqlite"))
+    try:
+        cdid = pub.stage_drop(store, WAVE, "correction: I was wrong",
+                              reply_to={"drop_id": "p1", "drop_part_id": 1},
+                              correcting=True)
+        row = store.get_action(cdid)
+        assert bool(row["correcting"]) is True
+
+        plain = pub.stage_drop(store, WAVE, "an ordinary reply",
+                               reply_to={"drop_id": "p2", "drop_part_id": 1})
+        assert bool(store.get_action(plain)["correcting"]) is False
+
+        monkeypatch.setattr(store, "already_replied_to", lambda d: True)
+        assert pol.can_publish(live_cfg(), store, WAVE, True, ELIGIBLE,
+                               "correction: I was wrong", "p1",
+                               correcting=bool(row["correcting"])).allowed
+    finally:
+        store.close()
+
+
+def test_an_older_outbox_migrates_and_defaults_to_not_correcting(tmp_path):
+    """The live database predates the column. Opening it must upgrade in
+    place, and an existing row must not become a correction by accident."""
+    path = str(tmp_path / "old.sqlite")
+    con = sqlite3.connect(path)
+    con.executescript("""
+      CREATE TABLE outbox (
+        client_drop_id TEXT PRIMARY KEY, wave_id TEXT NOT NULL,
+        reply_to_id TEXT, payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL, status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0, server_drop_id TEXT,
+        last_error TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, verified_at INTEGER);
+    """)
+    con.execute("INSERT INTO outbox VALUES('c1','w1','p1','{}','h','sent',"
+                "1,NULL,NULL,1000,1000,1000)")
+    con.commit(); con.close()
+
+    store = Store(path)
+    try:
+        row = store.get_action("c1")
+        assert row is not None, "existing rows must survive the migration"
+        assert bool(row["correcting"]) is False
+    finally:
+        store.close()

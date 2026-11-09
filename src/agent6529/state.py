@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS outbox (
   last_error     TEXT,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
-  verified_at    INTEGER
+  verified_at    INTEGER,
+  -- A correction of something already said. It travels with the action
+  -- because publish re-checks the gate independently of staging, and the
+  -- nature of the action is part of the action, not of the moment it was
+  -- drafted.
+  correcting     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS post_log (
   server_drop_id TEXT PRIMARY KEY,
@@ -69,6 +74,14 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status);
 CREATE INDEX IF NOT EXISTS idx_seen_wave ON seen_events(wave_id);
 """
+
+
+# Applied after the tables may already exist. Never add an index on a column
+# these statements introduce to SCHEMA itself: on an existing database the
+# index is created before the column and the whole script aborts.
+MIGRATIONS = [
+    "ALTER TABLE outbox ADD COLUMN correcting INTEGER NOT NULL DEFAULT 0",
+]
 
 
 def _hash(s: str) -> str:
@@ -86,6 +99,16 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring an older database forward. Idempotent and best-effort: a
+        migration must never take down a run that only wanted to read."""
+        for stmt in MIGRATIONS:
+            try:
+                self.db.execute(stmt)
+            except sqlite3.OperationalError:
+                pass            # already applied
 
     def close(self):
         self.db.close()
@@ -153,6 +176,7 @@ class Store:
         payload: Dict[str, Any],
         reply_to_id: Optional[str] = None,
         status: str = "draft",
+        correcting: bool = False,
     ) -> str:
         """One logical action. client_drop_id is minted here and frozen."""
         cdid = payload.get("client_drop_id") or str(uuid.uuid4())
@@ -162,8 +186,10 @@ class Store:
         now = int(time.time())
         self.db.execute(
             "INSERT INTO outbox(client_drop_id,wave_id,reply_to_id,payload_json,"
-            "content_hash,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-            (cdid, wave_id, reply_to_id, body, _hash(body), status, now, now),
+            "content_hash,status,created_at,updated_at,correcting) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (cdid, wave_id, reply_to_id, body, _hash(body), status, now, now,
+             1 if correcting else 0),
         )
         return cdid
 
