@@ -289,7 +289,10 @@ def status(data_dir: Optional[str] = None, binary: str = VALIDATOR_BIN,
     return {
         "exit_code": r.returncode,
         "healthy": r.returncode == EXIT_OK,
-        "needs_attention": r.returncode in (EXIT_ATTENTION, EXIT_STOPPED),
+        # Unknown exit codes are an explicit attention state, not a healthy
+        # state hidden behind the word "unexpected". The validator's status
+        # contract is finite; fail closed when a newer binary adds a code.
+        "needs_attention": r.returncode != EXIT_OK,
         "meaning": meaning,
         "alerts": (payload or {}).get("alerts") if isinstance(payload, dict) else None,
         "raw": payload if payload is not None else text[:4000],

@@ -893,6 +893,17 @@ def test_validator_status_surfaces_permission_fix(monkeypatch):
     assert r["needs_attention"] is False, "a setup note is not a validator alarm"
 
 
+def test_validator_status_treats_unknown_exit_as_attention(monkeypatch):
+    """An unrecognised state must not be reported as healthy or ignored."""
+    import subprocess as sp
+    monkeypatch.setattr(val.subprocess, "run",
+                        lambda cmd, **kw: sp.CompletedProcess(cmd, 17, "", ""))
+    r = val.status(binary="validator")
+    assert r["healthy"] is False
+    assert r["needs_attention"] is True
+    assert r["meaning"] == "unexpected exit 17"
+
+
 def test_add_wave_rejects_shell_mangled_id(tmpstate, capsys):
     """zsh's :A modifier turns "$WID:Name" into a path. Catch it, do not store it."""
     from agent6529 import cli
