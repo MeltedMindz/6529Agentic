@@ -1,2 +1,0 @@
-[console_scripts]
-6529 = agent6529.cli:main
