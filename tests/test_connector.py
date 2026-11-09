@@ -913,6 +913,8 @@ def test_add_wave_accepts_separate_name(tmpstate):
 
 
 # ------------------------------------------------------------------ memory
+import sqlite3  # noqa: E402
+
 from agent6529 import memory as mem_mod  # noqa: E402
 
 
@@ -1389,8 +1391,8 @@ def test_recall_returns_the_source_post(mem, monkeypatch):
             return {"embedding": [1.0, 0.0]}
         return {"response": '["leave the validator running overnight"]'}
     monkeypatch.setattr(mem_mod, "_post", post)
-    full = "Yes. Leave it on through tomorrow's signing at about 00:15 UTC."
-    mem.observe("d1", full, "punk6529bot", "w1", "Ministry")
+    full = "Yes. Keep the node up through tonight's run and check it at 06:00."
+    mem.observe("d1", full, "someholder", "w1", "Ministry")
     mem.learn_batch()
     hits = mem.recall("validator overnight")
     assert hits and hits[0].source == full, "source must come back with the claim"
@@ -1401,3 +1403,251 @@ def test_date_of_handles_seconds_and_millis():
     assert mem_mod._date_of(1794075815) == "2026-11-07"
     assert mem_mod._date_of(1794075815000) == "2026-11-07"
     assert mem_mod._date_of(None) == "an unknown date"
+
+
+# -------------------------------------------- memory v2: provenance, hybrid,
+# -------------------------------------------- supersession
+def test_subject_is_only_taken_from_an_explicit_handle():
+    assert mem_mod._subject_of("@alice runs a validator") == "alice"
+    assert mem_mod._subject_of("@[bob] signed the root") == "bob"
+    # Prose naming someone is NOT a subject. Guessing here would manufacture
+    # the false attributions the provenance gate exists to stop.
+    assert mem_mod._subject_of("alice runs a validator") is None
+    assert mem_mod._subject_of("") is None
+
+
+def test_assertion_tiers():
+    t = mem_mod.Memory.assertion_tier
+    assert t("bob", "bob") == "self"
+    assert t("mallory", "bob") == "third_party"
+    assert t("melted", "bob", ("MeltedMindz", "melted")) == "operator"
+    assert t("anyone", None) == "public_post_by_self"
+
+
+def test_third_party_claims_are_stored_but_never_recalled(mem, monkeypatch):
+    """Anyone who can post must not be able to write the agent's memory
+    about someone else."""
+    _fake_local(monkeypatch, claims=["@bob runs the validator on a Pi"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post in which mallory makes a claim about bob",
+                "mallory", "w1", "Wave One")
+    assert mem.learn_batch()["notes_created"] == 1
+
+    row = mem.db.execute("SELECT asserted_by, subject FROM notes").fetchone()
+    assert row["asserted_by"] == "third_party"
+    assert row["subject"] == "bob"
+
+    assert mem.recall("who runs the validator", k=5) == []
+    assert mem.about("mallory") == []
+    # degraded paths must honour the same gate
+    assert mem._keyword_recall("validator", 5, None, None) == []
+
+
+def test_self_assertion_is_recalled(mem, monkeypatch):
+    _fake_local(monkeypatch, claims=["@bob runs the validator on a Pi"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post in which bob says what he runs himself",
+                "bob", "w1", "Wave One")
+    mem.learn_batch()
+    assert mem.db.execute(
+        "SELECT asserted_by FROM notes").fetchone()["asserted_by"] == "self"
+    assert mem.recall("who runs the validator", k=5)
+
+
+def test_operator_may_assert_about_anyone(mem, monkeypatch):
+    monkeypatch.setattr(mem_mod.Memory, "operator_handles", ("MeltedMindz",))
+    _fake_local(monkeypatch, claims=["@bob is authorised to deploy"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post in which the operator states who may deploy",
+                "meltedmindz", "w1")
+    mem.learn_batch()
+    assert mem.db.execute(
+        "SELECT asserted_by FROM notes").fetchone()["asserted_by"] == "operator"
+    assert mem.recall("who may deploy", k=5)
+
+
+def test_lexical_half_separates_identifiers_the_dense_half_blurs(mem, monkeypatch):
+    """The whole reason for hybrid retrieval: one shared embedding makes the
+    dense half blind, and only BM25 tells rc.11 from rc.12."""
+    if not mem._fts:
+        pytest.skip("sqlite built without FTS5")
+    _fake_local(monkeypatch, vec=[1.0, 0.0])   # every note embeds identically
+    for i, ver in enumerate(("rc.11", "rc.12", "rc.13")):
+        mem.observe(f"d{i}", f"a long post about the {ver} release of hermes",
+                    "axiom", "w1", "Dev")
+        mem.db.execute(
+            "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,kind,"
+            "embedding,created_at) VALUES(?,?,?,?,?,'claim',?,?)",
+            (f"hermes {ver} is the release that needs sudo", f"d{i}", "w1",
+             "Dev", "axiom", mem_mod._pack([1.0, 0.0]), 1000 + i))
+
+    hits = mem.recall("which hermes rc.12 release", k=3)
+    assert hits, "hybrid recall returned nothing"
+    assert "rc.12" in hits[0].text, [h.text for h in hits]
+
+
+def test_hybrid_recall_survives_a_build_without_fts(mem, monkeypatch):
+    monkeypatch.setattr(mem, "_fts", False)
+    _fake_local(monkeypatch, claims=["a durable claim about validators"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post about validators that should be learned",
+                "alice", "w1")
+    mem.learn_batch()
+    assert mem.recall("validators", k=3)       # dense-only still answers
+
+
+def test_supersede_replaces_a_claim_and_keeps_the_old_row(mem, monkeypatch):
+    _fake_local(monkeypatch, claims=["hermes rc.11 is the current release"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post stating which hermes release is current",
+                "axiom", "w1", "Dev")
+    mem.learn_batch()
+    old = mem.db.execute("SELECT id FROM notes").fetchone()["id"]
+
+    new = mem.supersede(old, "hermes rc.12 is the current release")
+
+    rows = {r["id"]: r for r in mem.db.execute(
+        "SELECT id,status,supersedes,valid_to FROM notes")}
+    assert rows[old]["status"] == "superseded"
+    assert rows[old]["valid_to"] is not None, "closed rows must be dated"
+    assert rows[new]["status"] == "active"
+    assert rows[new]["supersedes"] == old
+
+    texts = [h.text for h in mem.recall("current hermes release", k=5)]
+    assert any("rc.12" in t for t in texts)
+    assert not any("rc.11" in t for t in texts), "superseded claim resurfaced"
+
+
+def test_supersede_rejects_an_unknown_note(mem):
+    with pytest.raises(mem_mod.MemoryError_):
+        mem.supersede(9999, "whatever")
+
+
+def test_forget_revokes_by_id_and_by_subject(mem, monkeypatch):
+    _fake_local(monkeypatch, claims=["@bob said he would run a node"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post in which bob says he will run a node",
+                "bob", "w1")
+    mem.learn_batch()
+    nid = mem.db.execute("SELECT id FROM notes").fetchone()["id"]
+    assert mem.recall("who runs a node", k=5)
+
+    assert mem.forget(note_id=nid) == 1
+    assert mem.recall("who runs a node", k=5) == []
+    assert mem.about("bob") == []
+    # retained, not deleted: the claim must not be silently re-learnable
+    assert mem.db.execute(
+        "SELECT status FROM notes WHERE id=?", (nid,)).fetchone()["status"] \
+        == "revoked"
+    assert mem.forget(note_id=nid) == 0        # idempotent
+
+    assert mem.forget(subject="bob") == 0      # already revoked
+    with pytest.raises(mem_mod.MemoryError_):
+        mem.forget()
+
+
+def test_forget_by_subject_revokes_every_claim_about_them(mem, monkeypatch):
+    _fake_local(monkeypatch, vec=[1.0, 0.0])
+    for i in range(3):
+        mem.db.execute(
+            "INSERT INTO notes(text,drop_id,wave_id,author,kind,embedding,"
+            "created_at,asserted_by,subject) "
+            "VALUES(?,?,?,?,'claim',?,?,'self','bob')",
+            (f"@bob claim {i}", f"d{i}", "w1", "bob",
+             mem_mod._pack([1.0, 0.0]), 1000 + i))
+    assert mem.forget(subject="BOB") == 3      # case-insensitive
+    assert mem.recall("bob claim", k=5) == []
+
+
+def test_an_old_database_migrates_in_place_without_losing_notes(tmp_path, monkeypatch):
+    """A live cron DB predates these columns. Opening it must upgrade it, keep
+    every row, and treat pre-existing notes as trusted rather than silently
+    dropping them from recall."""
+    path = str(tmp_path / "old.sqlite")
+    con = sqlite3.connect(path)
+    con.executescript("""
+      CREATE TABLE observations (
+        drop_id TEXT PRIMARY KEY, wave_id TEXT, wave_name TEXT, author TEXT,
+        content TEXT NOT NULL, created_at INTEGER, suspicious INTEGER NOT NULL
+          DEFAULT 0, learned_at INTEGER, seen_at INTEGER NOT NULL);
+      CREATE TABLE notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL,
+        drop_id TEXT NOT NULL, wave_id TEXT, wave_name TEXT, author TEXT,
+        kind TEXT NOT NULL DEFAULT 'claim', embedding BLOB,
+        created_at INTEGER NOT NULL, UNIQUE(drop_id, text));
+    """)
+    con.execute("INSERT INTO observations VALUES"
+                "('d1','w1','Wave One','alice','an older observation',"
+                "1000,0,1000,1000)")
+    con.execute("INSERT INTO notes(text,drop_id,wave_id,wave_name,author,"
+                "embedding,created_at) VALUES"
+                "('an older claim about validators','d1','w1','Wave One',"
+                "'alice',?,1000)", (mem_mod._pack([1.0, 0.0]),))
+    con.commit(); con.close()
+
+    m = mem_mod.Memory(path)
+    try:
+        assert m.stats()["notes"] == 1
+        assert m.stats()["observations"] == 1
+        cols = {r[1] for r in m.db.execute("PRAGMA table_info(notes)")}
+        assert {"asserted_by", "subject", "status", "supersedes",
+                "valid_to"} <= cols
+        row = m.db.execute("SELECT asserted_by,status FROM notes").fetchone()
+        assert row["asserted_by"] == "public_post_by_self"
+        assert row["status"] == "active"
+        _fake_local(monkeypatch, vec=[1.0, 0.0])
+        assert m.recall("validators", k=3), "migrated notes vanished from recall"
+        if m._fts:                 # backfilled into the lexical index too
+            assert m.db.execute(
+                "SELECT count(*) c FROM notes_fts "
+                "WHERE notes_fts MATCH 'validators'").fetchone()["c"] == 1
+    finally:
+        m.close()
+
+
+def test_migration_is_idempotent_across_reopens(tmp_path, monkeypatch):
+    path = str(tmp_path / "m.sqlite")
+    for _ in range(3):
+        m = mem_mod.Memory(path)
+        _fake_local(monkeypatch, claims=["one durable claim"], vec=[1.0, 0.0])
+        m.observe("d1", "a long enough post to be considered for learning",
+                  "a", "w1")
+        m.learn_batch()
+        m.close()
+    m = mem_mod.Memory(path)
+    try:
+        assert m.stats()["notes"] == 1
+    finally:
+        m.close()
+
+
+def test_cli_exposes_retraction(tmp_path, monkeypatch, capsys):
+    """Enforcement nobody can reach is not enforcement: the operator needs a
+    command to retract with."""
+    path = str(tmp_path / "m.sqlite")
+    monkeypatch.setattr(mem_mod, "DB_PATH", path)
+    m = mem_mod.Memory(path)
+    m.db.execute(
+        "INSERT INTO notes(text,drop_id,wave_id,author,kind,embedding,"
+        "created_at,asserted_by,subject) VALUES"
+        "('@bob will run a node','d1','w1','bob','claim',?,1000,'self','bob')",
+        (mem_mod._pack([1.0, 0.0]),))
+    nid = m.db.execute("SELECT id FROM notes").fetchone()["id"]
+    m.close()
+
+    from agent6529 import cli as cli_mod
+    assert cli_mod.main(["supersede", str(nid), "--content",
+                         "@bob already runs a node"]) == 0
+    capsys.readouterr()
+    assert cli_mod.main(["forget", "--about", "bob"]) == 0
+    assert json.loads(capsys.readouterr().out)["revoked"] == 2
+    assert cli_mod.main(["forget"]) == 2       # refuses an unscoped retraction
+
+    m = mem_mod.Memory(path)
+    try:
+        assert m.db.execute(
+            "SELECT count(*) c FROM notes WHERE status='revoked'"
+        ).fetchone()["c"] == 2
+        assert m.db.execute("SELECT count(*) c FROM notes").fetchone()["c"] == 2
+    finally:
+        m.close()

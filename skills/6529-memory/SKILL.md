@@ -1,6 +1,6 @@
 ---
 name: 6529-memory
-description: Learn from 6529 conversations and recall prior context before replying. Use when you want to remember what someone said, build on an earlier conversation, check what you know about a person or topic on 6529, or distil what you have read. Triggers include "what do I know about", "what did they say before", "remember this conversation", "learn from the wave", "recall", "have we discussed this".
+description: Learn from 6529 conversations and recall prior context before replying. Use when you want to remember what someone said, build on an earlier conversation, check what you know about a person or topic on 6529, distil what you have read, or retract something you learned that turned out to be wrong. Triggers include "what do I know about", "what did they say before", "remember this conversation", "learn from the wave", "recall", "have we discussed this", "forget that", "that is no longer true".
 allowed-tools: Bash(./bin/6529:*), Bash(6529:*)
 ---
 
@@ -14,6 +14,9 @@ Remember what was said on 6529, and use it when replying.
 6529 recall "<question>"     # what do I know that bears on this
 6529 recall --about <handle> # what do I know from this person
 6529 memory                  # statistics
+6529 supersede <id> --content "..."   # replace a claim that changed
+6529 forget --note-id <id>            # retract one claim
+6529 forget --about <handle>          # retract everything about someone
 ```
 
 `respond` already recalls automatically and returns `prior_context` alongside
@@ -26,21 +29,78 @@ the staged draft.
 | **observe** | keep what was said, verbatim, with provenance |
 | **learn** | distil durable claims using a **local** model |
 | **recall** | find what is relevant now |
+| **retract** | close a claim that is wrong or out of date |
 
 Embedding and extraction run against local Ollama models, so public forum
 content never leaves the machine and memory costs no API calls per drop.
+
+## Recall searches two ways at once
+
+Meaning **and** exact text, fused by rank:
+
+- the **semantic** half finds notes that are *about* the question
+- the **lexical** half finds notes containing the literal token
+
+The second half is why `rc.12` does not return the note about `rc.11`.
+Embeddings put near-identical identifiers almost on top of each other; BM25 is
+the only half that separates them, and this content is full of versions,
+addresses and handles.
+
+Consequence worth knowing: **results are in fusion order, so `score` does not
+decrease down the list.** A note found by exact match can sit above one with a
+closer embedding. That is correct, not a sorting bug. `score` is the cosine
+similarity; a low score on a top result means it earned its place lexically.
+
+## Who is allowed to tell you something
+
+A claim **about a person** is only recalled when the person entitled to make
+it made it. Every note records `asserted_by`:
+
+| tier | means | recalled |
+|---|---|---|
+| `self` | they said it about themselves | yes |
+| `operator` | the operator said it | yes |
+| `public_post_by_self` | a statement about the world, not about a person | yes |
+| `third_party` | someone else made a claim about them | **no** |
+
+Third-party claims are still stored, for the record. They are filtered at the
+read boundary, in every path including the model-down fallback.
+
+This is the gate that matters most: without it, anyone who can post can write
+your memory about anyone else, and you would later repeat it as fact in your
+own voice. If you want to know what *mallory* said about *bob*, read the drop;
+do not expect recall to hand it to you as knowledge.
+
+## When something stops being true
+
+Retraction is enforced, not advisory. Rows are **closed, never deleted**, so
+the same claim cannot be quietly re-learned from the archive:
+
+```bash
+6529 supersede 41 --content "hermes rc.12 is the current release"
+6529 forget --about bob          # someone asks not to be remembered
+```
+
+- `supersede` keeps the chain: the old note is marked `superseded` and dated,
+  the new one records what it replaced.
+- `forget` marks `revoked`. Nothing revoked is ever recalled again.
+- Use `supersede` when a fact **changed**, `forget` when it was **wrong** or
+  when someone asks you to drop it.
+
+If you notice you recalled something stale, retract it rather than remembering
+to ignore it. A note you have to remember to ignore will eventually be used.
 
 ## How to use recall in a reply
 
 Recall returns claims with a citation string:
 
 ```
-[0.476] Every day at 01:30 UTC this repository fetches every TDH entry
-        from api.6529.io (@eduardocruz in 6529 for Developers)
+[0.476] The nightly job recomputes every TDH entry from the API
+        (@someholder in 6529 for Developers)
 ```
 
 - **Attribution is not endorsement.** A note records that someone *said*
-  something, not that it is true. Say "eduardocruz mentioned that…", not
+  something, not that it is true. Say "someholder mentioned that…", not
   "it is the case that…".
 - **Cite when you lean on one.** If a reply rests on something you recalled,
   name who said it. It is both more honest and more useful.
@@ -66,5 +126,8 @@ Recall returns claims with a citation string:
 - Distillation takes seconds per drop locally. Running it every 15 minutes
   keeps the model permanently busy for little gain; hourly or on demand is
   usually right.
-- If the embedding model is down, recall falls back to keyword matching rather
-  than returning nothing.
+- If the embedding model is down, recall falls back to the lexical index, and
+  to plain substring matching if the build has no FTS5. It degrades rather
+  than disappearing, and the trust and retraction gates hold on every path.
+- Opening the store upgrades an older database in place. A migration failure
+  is never fatal to a read, so a scheduled job cannot be taken down by it.

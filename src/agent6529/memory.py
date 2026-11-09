@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS notes (
   kind        TEXT NOT NULL DEFAULT 'claim',
   embedding   BLOB,
   created_at  INTEGER NOT NULL,
+  -- Who is entitled to assert this. A claim ABOUT someone may only be made
+  -- by them, by the operator, or by their own public post. Anything else is
+  -- third_party: kept for the record, never recalled as fact. Without this,
+  -- anyone who can post can write the agent's memory about anyone.
+  asserted_by TEXT NOT NULL DEFAULT 'public_post_by_self',
+  subject     TEXT,
+  -- Supersession. No shipping memory system enforces retraction, so it is
+  -- built here: invalidate, never delete, and filter at the read boundary.
+  status      TEXT NOT NULL DEFAULT 'active',
+  supersedes  INTEGER,
+  valid_to    INTEGER,
   UNIQUE(drop_id, text)
 );
 CREATE INDEX IF NOT EXISTS idx_notes_author ON notes(author);
@@ -76,6 +87,43 @@ CREATE INDEX IF NOT EXISTS idx_notes_wave   ON notes(wave_id);
 CREATE INDEX IF NOT EXISTS idx_obs_wave     ON observations(wave_id);
 CREATE INDEX IF NOT EXISTS idx_obs_learned  ON observations(learned_at);
 """
+
+# Added after the table may already exist. Applied one at a time so an older
+# database upgrades in place without losing rows.
+MIGRATIONS = [
+    "ALTER TABLE notes ADD COLUMN asserted_by TEXT NOT NULL DEFAULT 'public_post_by_self'",
+    "ALTER TABLE notes ADD COLUMN subject TEXT",
+    "ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE notes ADD COLUMN supersedes INTEGER",
+    "ALTER TABLE notes ADD COLUMN valid_to INTEGER",
+    "CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_subject ON notes(subject)",
+]
+
+# Lexical half of retrieval. Content is identifier-dense (rc.12, 0xef2cc7d1,
+# handles) and embeddings blur exact tokens; BM25 is the only thing that
+# separates rc.11 from rc.12. Contentless FTS5 indexed by rowid = notes.id.
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts
+  USING fts5(text, content='notes', content_rowid='id', tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+  INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+  INSERT INTO notes_fts(notes_fts, rowid, text) VALUES('delete', old.id, old.text);
+  INSERT INTO notes_fts(rowid, text) VALUES (new.id, new.text);
+END;
+"""
+
+# Who may assert a claim about whom.
+TRUSTED_ASSERTERS = ("self", "operator", "public_post_by_self")
+
+# Bumped when the lexical index needs rebuilding from the notes table. Tracked
+# in PRAGMA user_version so the rebuild happens once, not on every open.
+SCHEMA_VERSION = 2
 
 
 class MemoryError_(Exception):
@@ -175,6 +223,19 @@ Post by @{author}: "{content}"
 JSON array:"""
 
 
+_HANDLE = re.compile(r"@\[?([A-Za-z0-9_]{2,30})\]?")
+
+
+def _subject_of(text: str) -> Optional[str]:
+    """The person a claim is about, if it names one.
+
+    Only an explicit @handle counts. Guessing a subject from prose would
+    create exactly the false attributions this gate exists to prevent.
+    """
+    m = _HANDLE.search(text or "")
+    return m.group(1) if m else None
+
+
 def _date_of(created_at: Optional[int]) -> str:
     if not created_at:
         return "an unknown date"
@@ -251,13 +312,57 @@ class Recalled:
 
 
 class Memory:
-    def __init__(self, path: str = DB_PATH):
+    operator_handles: tuple = tuple(
+        h for h in os.environ.get("AGENT6529_OPERATOR_HANDLES", "").split(",") if h
+    )
+
+    def __init__(self, path: Optional[str] = None):
+        # Resolved at call time, not bound as a default: the state directory
+        # can be set after this module is imported.
+        path = path or DB_PATH
+        self._fts = False
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         self.db = sqlite3.connect(path, timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring an older database forward in place.
+
+        Each step is attempted independently and a duplicate-column error is
+        expected on an already-migrated database, so this is idempotent. A
+        migration failure must never take down a cron run that only wanted to
+        read, so everything here is best-effort and the store stays usable.
+        """
+        for stmt in MIGRATIONS:
+            try:
+                self.db.execute(stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    pass            # index already present, or similar
+        try:
+            self.db.executescript(FTS_SCHEMA)
+            # Notes written before the index existed are invisible to it. An
+            # external-content FTS5 table cannot be diffed against its content
+            # table - a plain scan reads straight through to notes and every
+            # row looks present - so backfill is a one-shot 'rebuild', guarded
+            # by the schema version rather than repeated on every open.
+            if self._user_version() < SCHEMA_VERSION:
+                self.db.execute(
+                    "INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
+                self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self._fts = True
+        except sqlite3.Error:
+            self._fts = False       # no FTS5 build: dense-only still works
+
+    def _user_version(self) -> int:
+        try:
+            return int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        except (sqlite3.Error, TypeError, ValueError):
+            return 0
 
     def close(self):
         self.db.close()
@@ -289,6 +394,24 @@ class Memory:
         ).fetchall()
 
     # ---------------- learn ----------------
+    @staticmethod
+    def assertion_tier(author: Optional[str], subject: Optional[str],
+                       operator_handles: Iterable[str] = ()) -> str:
+        """Who is making this claim, about whom.
+
+        A post is self-assertion when its author is also its subject, operator
+        when the author is the operator, and third_party otherwise. Third-party
+        claims are stored but never recalled as fact.
+        """
+        a = (author or "").lower()
+        if a and a in {h.lower() for h in operator_handles}:
+            return "operator"
+        if subject and a and a == subject.lower():
+            return "self"
+        if not subject:
+            return "public_post_by_self"   # a statement about the world
+        return "third_party"
+
     def learn_one(self, row: sqlite3.Row, model: str = EXTRACT_MODEL) -> int:
         """Distil one observation into notes. Returns how many were kept."""
         claims = extract_claims(row["content"], row["author"], model=model,
@@ -301,12 +424,17 @@ class Memory:
             except MemoryError_:
                 vec = None
             try:
+                subject = _subject_of(text)
+                tier = self.assertion_tier(row["author"], subject,
+                                           self.operator_handles)
                 self.db.execute(
                     "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,"
-                    "kind,embedding,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    "kind,embedding,created_at,asserted_by,subject,status) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,'active')",
                     (text, row["drop_id"], row["wave_id"], row["wave_name"],
                      row["author"], "claim",
-                     _pack(vec) if vec else None, int(time.time())),
+                     _pack(vec) if vec else None, int(time.time()),
+                     tier, subject),
                 )
                 kept += 1
             except sqlite3.IntegrityError:
@@ -351,8 +479,10 @@ class Memory:
         Falls back to keyword matching when the embedding model is down, so
         recall degrades rather than disappearing.
         """
-        sql = "SELECT * FROM notes WHERE embedding IS NOT NULL"
-        params: List[Any] = []
+        sql = ("SELECT * FROM notes WHERE embedding IS NOT NULL"
+               " AND status = 'active'"
+               f" AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))})")
+        params: List[Any] = list(TRUSTED_ASSERTERS)
         if author:
             sql += " AND author = ?"
             params.append(author)
@@ -360,20 +490,23 @@ class Memory:
             sql += " AND wave_id = ?"
             params.append(wave_id)
         rows = self.db.execute(sql, params).fetchall()
-        if not rows:
-            return []
 
         floor = self.MIN_SCORE if min_score is None else min_score
-        try:
-            qv = embed(query)
-        except MemoryError_:
-            return self._keyword_recall(query, k, author, wave_id)
-
-        scored = []
-        for r in rows:
-            s = _cosine(qv, _unpack(r["embedding"]))
-            if s >= floor:
-                scored.append((s, r))
+        scored: List[Any] = []
+        if rows:
+            try:
+                qv = embed(query)
+            except MemoryError_:
+                # Model down. Lexical is a real index, not a guess, so prefer
+                # it over LIKE scanning; keep LIKE for a no-FTS build.
+                lex = self._lexical(query, k, author, wave_id)
+                if lex:
+                    return [self._mk(r, 0.0) for r in lex]
+                return self._keyword_recall(query, k, author, wave_id)
+            for r in rows:
+                s = _cosine(qv, _unpack(r["embedding"]))
+                if s >= floor:
+                    scored.append((s, r))
         scored.sort(key=lambda x: (x[0], x[1]["created_at"] or 0), reverse=True)
         scored = scored[:k]
         # Relative gap: once the best hit is known, anything far below it is
@@ -382,7 +515,70 @@ class Memory:
         if scored:
             cutoff = scored[0][0] - self.RELATIVE_GAP
             scored = [(s, r) for s, r in scored if s >= cutoff]
+
+        # Fuse with BM25. Embeddings encode what text is ABOUT, not which
+        # characters it contains, so "rc.11" and "rc.12" land almost on top of
+        # each other. Lexical search is the only half that separates them, and
+        # this content is full of versions, handles and addresses.
+        # A lexical hit deliberately bypasses the cosine floor: an exact
+        # identifier match is strong evidence even when the embedding is cold.
+        lex = self._lexical(query, k * 2, author, wave_id)
+        if lex:
+            return self._fuse(scored, lex, k, qv)
+        if not scored and not rows:
+            return self._keyword_recall(query, k, author, wave_id)
         return [self._mk(r, round(s, 3)) for s, r in scored]
+
+    def _lexical(self, query: str, k: int, author, wave_id) -> List[sqlite3.Row]:
+        """BM25 over the same notes, same trust and status gate."""
+        if not self._fts:
+            return []
+        terms = [t for t in re.findall(r"[\w.]{2,}", query or "")][:12]
+        if not terms:
+            return []
+        match = " OR ".join(f'"{t}"' for t in terms)
+        sql = ("SELECT n.* FROM notes_fts f JOIN notes n ON n.id = f.rowid "
+               "WHERE notes_fts MATCH ? AND n.status = 'active'"
+               f" AND n.asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))})")
+        params: List[Any] = [match, *TRUSTED_ASSERTERS]
+        if author:
+            sql += " AND n.author = ?"
+            params.append(author)
+        if wave_id:
+            sql += " AND n.wave_id = ?"
+            params.append(wave_id)
+        sql += " ORDER BY bm25(notes_fts) LIMIT ?"
+        params.append(k)
+        try:
+            return self.db.execute(sql, params).fetchall()
+        except sqlite3.Error:
+            return []
+
+    @staticmethod
+    def _rrf(rank: int, kconst: int = 60) -> float:
+        return 1.0 / (kconst + rank)
+
+    def _fuse(self, dense, lexical, k: int,
+              qv: Optional[List[float]] = None) -> List["Recalled"]:
+        """Reciprocal rank fusion. Rank-based, so the two score scales - cosine
+        and BM25 - never have to be made commensurable."""
+        scores: Dict[int, float] = {}
+        rowmap: Dict[int, sqlite3.Row] = {}
+        best: Dict[int, float] = {}
+        for i, (sc, r) in enumerate(dense):
+            scores[r["id"]] = scores.get(r["id"], 0.0) + self._rrf(i)
+            rowmap[r["id"]] = r
+            best[r["id"]] = sc
+        for i, r in enumerate(lexical):
+            scores[r["id"]] = scores.get(r["id"], 0.0) + self._rrf(i)
+            rowmap.setdefault(r["id"], r)
+            if r["id"] not in best:
+                # Report its real similarity, not 0.0. It got here on BM25,
+                # below the floor, and a reader needs to see which.
+                best[r["id"]] = (_cosine(qv, _unpack(r["embedding"]))
+                                 if qv and r["embedding"] else 0.0)
+        order = sorted(scores, key=lambda i: scores[i], reverse=True)[:k]
+        return [self._mk(rowmap[i], round(best.get(i, 0.0), 3)) for i in order]
 
     def _mk(self, r, score: float) -> "Recalled":
         src = self.db.execute(
@@ -398,9 +594,11 @@ class Memory:
         words = [w.lower() for w in re.findall(r"\w{4,}", query)][:8]
         if not words:
             return []
-        sql = "SELECT * FROM notes WHERE (" + " OR ".join(
-            "LOWER(text) LIKE ?" for _ in words) + ")"
-        params: List[Any] = [f"%{w}%" for w in words]
+        sql = ("SELECT * FROM notes WHERE status = 'active'"
+               f" AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))})"
+               " AND (" + " OR ".join(
+                   "LOWER(text) LIKE ?" for _ in words) + ")")
+        params: List[Any] = [*TRUSTED_ASSERTERS, *(f"%{w}%" for w in words)]
         if author:
             sql += " AND author = ?"; params.append(author)
         if wave_id:
@@ -410,11 +608,62 @@ class Memory:
         return [self._mk(r, 0.0)
                 for r in self.db.execute(sql, params).fetchall()]
 
+    def supersede(self, note_id: int, new_text: str,
+                  drop_id: Optional[str] = None) -> int:
+        """Replace a claim. The old row is closed, never deleted.
+
+        Retraction is the one capability no shipping memory system enforces,
+        so it is enforced here at the read boundary rather than by a flag the
+        model is expected to notice.
+        """
+        old = self.db.execute("SELECT * FROM notes WHERE id=?",
+                              (note_id,)).fetchone()
+        if old is None:
+            raise MemoryError_(f"no note {note_id}")
+        try:
+            vec = embed(contextualize(new_text, old["author"], old["wave_name"],
+                                      old["created_at"]))
+        except MemoryError_:
+            vec = None
+        now = int(time.time())
+        cur = self.db.execute(
+            "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,kind,"
+            "embedding,created_at,asserted_by,subject,status,supersedes) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
+            (new_text, drop_id or old["drop_id"], old["wave_id"],
+             old["wave_name"], old["author"], old["kind"],
+             _pack(vec) if vec else None, now, old["asserted_by"],
+             old["subject"], note_id))
+        self.db.execute(
+            "UPDATE notes SET status='superseded', valid_to=? WHERE id=?",
+            (now, note_id))
+        return cur.lastrowid
+
+    def forget(self, note_id: Optional[int] = None,
+               subject: Optional[str] = None, reason: str = "") -> int:
+        """Honour a retraction. Rows are closed, not removed, so the same
+        claim cannot be silently re-learned from the archive."""
+        now = int(time.time())
+        if note_id is not None:
+            cur = self.db.execute(
+                "UPDATE notes SET status='revoked', valid_to=? "
+                "WHERE id=? AND status!='revoked'", (now, note_id))
+        elif subject:
+            cur = self.db.execute(
+                "UPDATE notes SET status='revoked', valid_to=? "
+                "WHERE LOWER(subject)=LOWER(?) AND status!='revoked'",
+                (now, subject))
+        else:
+            raise MemoryError_("forget needs a note_id or a subject")
+        return cur.rowcount
+
     def about(self, author: str, k: int = 10) -> List[Recalled]:
         """Everything learned from one person, newest first."""
         rows = self.db.execute(
-            "SELECT * FROM notes WHERE author=? ORDER BY created_at DESC LIMIT ?",
-            (author, k),
+            "SELECT * FROM notes WHERE author=? AND status='active' "
+            f"AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))}) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (author, *TRUSTED_ASSERTERS, k),
         ).fetchall()
         return [self._mk(r, 1.0) for r in rows]
 

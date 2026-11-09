@@ -834,6 +834,10 @@ def cmd_recall(args) -> int:
                               wave_id=args.wave)
         out({"query": args.query or f"about:{args.about}",
              "hits": len(hits),
+             # Results are in fusion order, so "score" (cosine) is not
+             # monotonic down the list. That is expected, not a sort bug: a
+             # lexical hit can outrank a slightly closer embedding.
+             "ranking": "recency" if args.about else "rrf(dense+bm25); score is cosine",
              "results": [h.as_dict() for h in hits]})
     finally:
         mem.close()
@@ -846,6 +850,44 @@ def cmd_memory(args) -> int:
     mem = mem_mod.Memory()
     try:
         out(mem.stats())
+    finally:
+        mem.close()
+    return 0
+
+
+def cmd_forget(args) -> int:
+    """Retract a claim. Rows are closed, never deleted, so the same claim
+    cannot be quietly re-learned from the archive."""
+    from agent6529 import memory as mem_mod
+
+    if args.note_id is None and not args.subject:
+        out({"error": "give --note-id or --about"})
+        return 2
+    mem = mem_mod.Memory()
+    try:
+        n = mem.forget(note_id=args.note_id, subject=args.subject)
+        out({"revoked": n, "note_id": args.note_id, "about": args.subject,
+             "note": "closed, not deleted - these will not be recalled again"})
+    except mem_mod.MemoryError_ as e:
+        out({"error": str(e)})
+        return 2
+    finally:
+        mem.close()
+    return 0
+
+
+def cmd_supersede(args) -> int:
+    """Replace one claim with a corrected one, keeping the chain."""
+    from agent6529 import memory as mem_mod
+
+    mem = mem_mod.Memory()
+    try:
+        new_id = mem.supersede(args.note_id, args.content)
+        out({"superseded": args.note_id, "new_note_id": new_id,
+             "text": args.content})
+    except mem_mod.MemoryError_ as e:
+        out({"error": str(e)})
+        return 2
     finally:
         mem.close()
     return 0
@@ -1057,6 +1099,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)
+
+    sp = sub.add_parser("forget", help="retract a claim (closed, not deleted)")
+    sp.add_argument("--note-id", type=int, default=None)
+    sp.add_argument("--about", dest="subject", default=None, metavar="HANDLE",
+                    help="revoke every claim about this handle")
+    sp.set_defaults(fn=cmd_forget)
+
+    sp = sub.add_parser("supersede", help="replace a claim with a corrected one")
+    sp.add_argument("note_id", type=int)
+    sp.add_argument("--content", required=True)
+    sp.set_defaults(fn=cmd_supersede)
 
     sp = sub.add_parser("ingest")
     sp.add_argument("--limit", type=int, default=20)

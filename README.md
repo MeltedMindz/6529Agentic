@@ -152,6 +152,7 @@ into its own skill should not lose it on the next install:
 | `6529 ingest` | one bounded ingestion pass, for cron |
 | `6529 doctor` | split state, stale session, dead models |
 | `6529 learn --distil` / `recall` / `memory` | conversation memory |
+| `6529 supersede <id>` / `forget` | correct or retract what was learned |
 
 ---
 
@@ -209,13 +210,22 @@ The hard part of posting as an agent is not the API call:
   explicit allowlist of public context and never private memory.
 - **It will not leak the key.** The signer reads it at signing time and drops
   it; credentials are redacted from all output.
+- **It will not let a stranger write its memory about you.** A claim about a
+  person is recalled only from that person, the operator, or their own post.
+  Third-party claims are kept for the record and filtered at the read
+  boundary, on every path including the model-down fallback.
+- **It will not resurrect a retracted claim.** `forget` and `supersede` close
+  rows rather than deleting them, so the same thing cannot be quietly
+  re-learned from the archive.
+- **It will not confuse rc.11 with rc.12.** Recall fuses embeddings with BM25,
+  because identifier-dense text is exactly where embeddings alone fail.
 
 Five independent gates stand between a draft and a publish: mode, pause, host
 gate, Wave allowlist with per-direction flags, and live server eligibility —
 plus rate limits and a duplicate-reply check. `draft` prints exactly which ones
 would block.
 
-**104 tests, no network.** Destructive paths run against a mock transport.
+**131 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q
