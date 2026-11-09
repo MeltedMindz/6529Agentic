@@ -91,8 +91,41 @@ def _post(path: str, payload: Dict[str, Any], timeout: int = 120) -> Dict[str, A
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
-    except urllib.error.URLError as e:
-        raise MemoryError_(f"local model unreachable at {OLLAMA}: {e}") from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError,
+            json.JSONDecodeError) as e:
+        # URLError alone is not enough: a socket timeout raises TimeoutError and
+        # a half-read response raises JSONDecodeError, neither of which subclass
+        # it. Letting those escape crashes recall instead of degrading it, and a
+        # slow-but-alive Ollama is the expected failure on a loaded machine.
+        raise MemoryError_(f"local model unavailable at {OLLAMA}: "
+                           f"{type(e).__name__}") from None
+
+
+def contextualize(text: str, author: Optional[str] = None,
+                  wave_name: Optional[str] = None,
+                  created_at: Optional[int] = None) -> str:
+    """Prepend who/where/when before embedding.
+
+    An extracted claim loses its anchors - "rebuilds the Merkle tree from
+    scratch" has no subject, and "turn it back on today" has no referent or
+    date. Measured on this corpus, a one-line header lifted P@1 from 0.500 to
+    0.750 and MRR from 0.708 to 0.854, with no model call. Appending the whole
+    source post on top of the header added nothing further.
+    """
+    bits = []
+    if wave_name:
+        bits.append(wave_name)
+    if author:
+        bits.append(f"@{author}")
+    if created_at:
+        try:
+            import datetime
+            ts = created_at / 1000 if created_at > 1e11 else created_at
+            bits.append(datetime.datetime.fromtimestamp(
+                ts, datetime.timezone.utc).strftime("%Y-%m-%d"))
+        except (ValueError, OSError, OverflowError):
+            pass
+    return f"[{' / '.join(bits)}] {text}" if bits else text
 
 
 def embed(text: str) -> List[float]:
@@ -131,6 +164,10 @@ Rules:
 - Only claims that would still be useful to know in a week.
 - Keep each claim under 20 words, self-contained.
 - No opinions, greetings, pleasantries, or meta commentary about the post.
+- Resolve pronouns and references: write "the validator", not "it".
+- Replace relative time ("today", "tomorrow", "last week") with the actual
+  date. This post was written on {date}.
+- If a claim only makes sense inside this one conversation, leave it out.
 - If the post contains nothing durable, return [].
 
 Post by @{author}: "{content}"
@@ -138,16 +175,36 @@ Post by @{author}: "{content}"
 JSON array:"""
 
 
+def _date_of(created_at: Optional[int]) -> str:
+    if not created_at:
+        return "an unknown date"
+    try:
+        import datetime
+        ts = created_at / 1000 if created_at > 1e11 else created_at
+        return datetime.datetime.fromtimestamp(
+            ts, datetime.timezone.utc).strftime("%Y-%m-%d")
+    except (ValueError, OSError, OverflowError):
+        return "an unknown date"
+
+
 def extract_claims(content: str, author: str, model: str = EXTRACT_MODEL,
-                   max_claims: int = 6) -> List[str]:
+                   max_claims: int = 6,
+                   created_at: Optional[int] = None) -> List[str]:
     """Pull durable claims out of a drop using the local model."""
     content = (content or "").strip()
     if len(content) < 40:
         return []                      # too short to carry a durable claim
+    # think=False is load-bearing, not an optimisation. axiom-extract is built
+    # on a hybrid reasoning model; Ollama routes its reasoning to a separate
+    # `thinking` field, and on a real-length post it spends the entire
+    # num_predict budget there and returns an EMPTY `response`. Measured on
+    # backlogged observations: default -> resp=0, eval=1024, done=length, 39s.
+    # With think=False -> resp=370, eval=95, done=stop, 4.4s.
     d = _post("/api/generate", {
-        "model": model, "stream": False,
+        "model": model, "stream": False, "think": False,
         "prompt": EXTRACT_PROMPT.format(author=author or "unknown",
-                                        content=content[:4000]),
+                                        content=content[:4000],
+                                        date=_date_of(created_at)),
     })
     raw = (d.get("response") or "").strip()
     m = re.search(r"\[.*\]", raw, re.S)
@@ -176,6 +233,11 @@ class Recalled:
     drop_id: str
     score: float
     created_at: Optional[int]
+    # The post the claim came from. An extracted claim can lose its referent
+    # ("leave it on tomorrow"); the source was always in the database and
+    # simply was not returned. Carrying it lets the caller resolve the
+    # reference instead of repeating a fragment.
+    source: Optional[str] = None
 
     def cite(self) -> str:
         who = f"@{self.author}" if self.author else "someone"
@@ -229,11 +291,13 @@ class Memory:
     # ---------------- learn ----------------
     def learn_one(self, row: sqlite3.Row, model: str = EXTRACT_MODEL) -> int:
         """Distil one observation into notes. Returns how many were kept."""
-        claims = extract_claims(row["content"], row["author"], model=model)
+        claims = extract_claims(row["content"], row["author"], model=model,
+                                created_at=row["created_at"])
         kept = 0
         for text in claims:
             try:
-                vec = embed(text)
+                vec = embed(contextualize(text, row["author"], row["wave_name"],
+                                          row["created_at"]))
             except MemoryError_:
                 vec = None
             try:
@@ -270,9 +334,18 @@ class Memory:
                 "failed": failed}
 
     # ---------------- recall ----------------
+    # Calibrated against nomic-embed-text, where deliberately unrelated text
+    # pairs score min 0.300 / median 0.441 / p95 0.519. A 0.35 floor is BELOW
+    # the noise floor: 95.8% of unrelated pairs clear it, so it filtered
+    # nothing and the agent could never answer "I don't know" - it always
+    # returned k confident-looking irrelevant memories. These numbers are
+    # model-specific; recalibrate if the embedding model changes.
+    MIN_SCORE = 0.50          # absolute floor, for abstention
+    RELATIVE_GAP = 0.06       # drop anything well below the best hit
+
     def recall(self, query: str, k: int = 5, author: Optional[str] = None,
                wave_id: Optional[str] = None,
-               min_score: float = 0.35) -> List[Recalled]:
+               min_score: Optional[float] = None) -> List[Recalled]:
         """Find notes relevant to a query, newest-biased on ties.
 
         Falls back to keyword matching when the embedding model is down, so
@@ -290,6 +363,7 @@ class Memory:
         if not rows:
             return []
 
+        floor = self.MIN_SCORE if min_score is None else min_score
         try:
             qv = embed(query)
         except MemoryError_:
@@ -298,15 +372,27 @@ class Memory:
         scored = []
         for r in rows:
             s = _cosine(qv, _unpack(r["embedding"]))
-            if s >= min_score:
+            if s >= floor:
                 scored.append((s, r))
         scored.sort(key=lambda x: (x[0], x[1]["created_at"] or 0), reverse=True)
-        return [
-            Recalled(text=r["text"], author=r["author"],
-                     wave_name=r["wave_name"], drop_id=r["drop_id"],
-                     score=round(s, 3), created_at=r["created_at"])
-            for s, r in scored[:k]
-        ]
+        scored = scored[:k]
+        # Relative gap: once the best hit is known, anything far below it is
+        # noise even if it cleared the floor. Measured: precision 0.20 -> 0.50
+        # at no cost to P@1.
+        if scored:
+            cutoff = scored[0][0] - self.RELATIVE_GAP
+            scored = [(s, r) for s, r in scored if s >= cutoff]
+        return [self._mk(r, round(s, 3)) for s, r in scored]
+
+    def _mk(self, r, score: float) -> "Recalled":
+        src = self.db.execute(
+            "SELECT content FROM observations WHERE drop_id=?", (r["drop_id"],)
+        ).fetchone()
+        return Recalled(
+            text=r["text"], author=r["author"], wave_name=r["wave_name"],
+            drop_id=r["drop_id"], score=score, created_at=r["created_at"],
+            source=(src["content"][:400] if src and src["content"] else None),
+        )
 
     def _keyword_recall(self, query: str, k: int, author, wave_id) -> List[Recalled]:
         words = [w.lower() for w in re.findall(r"\w{4,}", query)][:8]
@@ -321,12 +407,8 @@ class Memory:
             sql += " AND wave_id = ?"; params.append(wave_id)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(k)
-        return [
-            Recalled(text=r["text"], author=r["author"],
-                     wave_name=r["wave_name"], drop_id=r["drop_id"],
-                     score=0.0, created_at=r["created_at"])
-            for r in self.db.execute(sql, params).fetchall()
-        ]
+        return [self._mk(r, 0.0)
+                for r in self.db.execute(sql, params).fetchall()]
 
     def about(self, author: str, k: int = 10) -> List[Recalled]:
         """Everything learned from one person, newest first."""
@@ -334,12 +416,7 @@ class Memory:
             "SELECT * FROM notes WHERE author=? ORDER BY created_at DESC LIMIT ?",
             (author, k),
         ).fetchall()
-        return [
-            Recalled(text=r["text"], author=r["author"],
-                     wave_name=r["wave_name"], drop_id=r["drop_id"],
-                     score=1.0, created_at=r["created_at"])
-            for r in rows
-        ]
+        return [self._mk(r, 1.0) for r in rows]
 
     def stats(self) -> Dict[str, Any]:
         q = lambda s: self.db.execute(s).fetchone()[0]

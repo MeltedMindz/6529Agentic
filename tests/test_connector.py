@@ -1252,3 +1252,152 @@ def test_doctor_detects_split_state(tmp_path, monkeypatch, capsys):
     assert any("active store is not the one holding data" in f["problem"]
                for f in probs)
     assert any("--state-dir" in (f.get("fix") or "") for f in probs)
+
+
+def test_extraction_disables_thinking(monkeypatch):
+    """axiom-extract burns its whole budget on `thinking` and returns an empty
+    `response` otherwise. Measured: resp=0/eval=1024/done=length at 39s."""
+    captured = {}
+
+    def post(path, payload, timeout=120):
+        captured.update(payload)
+        return {"response": '["a durable claim about validators"]'}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem_mod.extract_claims("x" * 120, "alice")
+    assert captured.get("think") is False, "think must be disabled explicitly"
+
+
+def test_contextualize_adds_who_where_when():
+    out = mem_mod.contextualize("rebuilds the tree", "bob", "Dev Wave", 1794075815)
+    assert out.startswith("[Dev Wave / @bob / 2026-11-07]")
+    assert "rebuilds the tree" in out
+    assert mem_mod.contextualize("bare") == "bare"
+
+
+def test_contextualize_survives_bad_timestamps():
+    assert "bare" in mem_mod.contextualize("bare", "a", "w", -99999999999999)
+
+
+def test_embedding_includes_context_header(mem, monkeypatch):
+    seen = []
+
+    def post(path, payload, timeout=120):
+        if path == "/api/embeddings":
+            seen.append(payload["prompt"])
+            return {"embedding": [1.0, 0.0]}
+        return {"response": '["validators sign daily"]'}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem.observe("d1", "a long post about validators signing every day here",
+                "alice", "w1", "Dev Wave", created_at=1794075815)
+    mem.learn_batch()
+    assert seen and seen[0].startswith("[Dev Wave / @alice"), seen
+
+
+def test_floor_is_above_the_model_noise_floor():
+    """0.35 let 95.8% of unrelated pairs through, so it filtered nothing."""
+    assert mem_mod.Memory.MIN_SCORE >= 0.50
+
+
+def test_recall_can_abstain_on_irrelevant_queries(mem, monkeypatch):
+    def post(path, payload, timeout=120):
+        if path == "/api/embeddings":
+            p = payload["prompt"]
+            return {"embedding": [1.0, 0.0] if "validator" in p else [0.0, 1.0]}
+        return {"response": '["validators sign daily"]'}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem.observe("d1", "a long post about validators signing every single day",
+                "alice", "w1")
+    mem.learn_batch()
+    assert mem.recall("validator signing") , "relevant query should hit"
+    assert mem.recall("sourdough baking") == [], "must return nothing, not junk"
+
+
+def test_relative_gap_drops_weak_trailing_hits(mem, monkeypatch):
+    import math
+    vecs = {"strong": [1.0, 0.0], "weak": [0.6, 0.8]}
+
+    def post(path, payload, timeout=120):
+        if path == "/api/embeddings":
+            p = payload["prompt"]
+            return {"embedding": vecs["weak"] if "weak" in p else vecs["strong"]}
+        return {"response": json.dumps([payload["prompt"].split('"')[-2][:40]])}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem.observe("d1", "a long post containing the strong matching subject here",
+                "a", "w1")
+    mem.observe("d2", "a long post containing the weak matching subject here",
+                "a", "w1")
+    mem.learn_batch()
+    hits = mem.recall("strong", k=5)
+    assert len(hits) <= 2
+    if len(hits) == 2:
+        assert hits[0].score - hits[1].score <= mem_mod.Memory.RELATIVE_GAP
+
+
+def test_post_degrades_on_timeout_not_crash(monkeypatch):
+    """TimeoutError does not subclass URLError; it used to escape and crash."""
+    def boom(*a, **k):
+        raise TimeoutError("read timed out")
+    monkeypatch.setattr(mem_mod.urllib.request, "urlopen", boom)
+    with pytest.raises(mem_mod.MemoryError_):
+        mem_mod.embed("anything")
+
+
+def test_post_degrades_on_bad_json(monkeypatch):
+    class R:
+        def read(self): return b"not json"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(mem_mod.urllib.request, "urlopen", lambda *a, **k: R())
+    with pytest.raises(mem_mod.MemoryError_):
+        mem_mod.embed("anything")
+
+
+def test_recall_falls_back_when_embedder_times_out(mem, monkeypatch):
+    def post(path, payload, timeout=120):
+        if path == "/api/embeddings":
+            return {"embedding": [1.0, 0.0]}
+        return {"response": '["the validator grant is typed data"]'}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem.observe("d1", "a long post about grants and how they get signed daily",
+                "bob", "w1")
+    mem.learn_batch()
+
+    def timeout(*a, **k):
+        raise TimeoutError("slow ollama")
+    monkeypatch.setattr(mem_mod.urllib.request, "urlopen", timeout)
+    hits = mem.recall("tell me about the grant")
+    assert hits and "grant" in hits[0].text, "must degrade to keywords"
+
+
+def test_extraction_prompt_carries_the_post_date(monkeypatch):
+    """Relative time must be resolved at extraction, not stored as 'tomorrow'."""
+    seen = {}
+
+    def post(path, payload, timeout=120):
+        seen["prompt"] = payload["prompt"]
+        return {"response": "[]"}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem_mod.extract_claims("x" * 120, "a", created_at=1794075815)
+    assert "2026-11-07" in seen["prompt"]
+    assert "Resolve pronouns" in seen["prompt"]
+
+
+def test_recall_returns_the_source_post(mem, monkeypatch):
+    """A claim can lose its referent; the source was always in the DB."""
+    def post(path, payload, timeout=120):
+        if path == "/api/embeddings":
+            return {"embedding": [1.0, 0.0]}
+        return {"response": '["leave the validator running overnight"]'}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    full = "Yes. Leave it on through tomorrow's signing at about 00:15 UTC."
+    mem.observe("d1", full, "punk6529bot", "w1", "Ministry")
+    mem.learn_batch()
+    hits = mem.recall("validator overnight")
+    assert hits and hits[0].source == full, "source must come back with the claim"
+    assert hits[0].drop_id == "d1"
+
+
+def test_date_of_handles_seconds_and_millis():
+    assert mem_mod._date_of(1794075815) == "2026-11-07"
+    assert mem_mod._date_of(1794075815000) == "2026-11-07"
+    assert mem_mod._date_of(None) == "an unknown date"
