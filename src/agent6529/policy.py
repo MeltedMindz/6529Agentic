@@ -155,6 +155,7 @@ def can_publish(
     content: str,
     parent_drop_id: Optional[str] = None,
     now: Optional[int] = None,
+    correcting: bool = False,
 ) -> PublishDecision:
     """Single gate every send must pass. Returns reasons, never raises."""
     now = now or int(time.time())
@@ -230,7 +231,13 @@ def can_publish(
         reasons.append(f"cooldown_active:{gap - (now - last)}s_remaining")
 
     # 8. self-reply / thread repetition
-    if parent_drop_id and store.already_replied_to(parent_drop_id):
+    #
+    # One exception: a correction. The duplicate guard and the no-self-reply
+    # guard together made it impossible to retract a wrong statement, so a
+    # falsehood would stand in public forever - a worse outcome than the
+    # duplicate either guard exists to prevent. `correcting` is set only by an
+    # explicit `6529 correct`, never by the ordinary reply path.
+    if parent_drop_id and not correcting and store.already_replied_to(parent_drop_id):
         reasons.append("already_replied_to_this_drop")
 
     return PublishDecision(

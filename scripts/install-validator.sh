@@ -20,6 +20,21 @@ CHECK_ONLY=0
 say() { printf '\n== %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Installing needs root. On a headless box - the case this is written for -
+# there is no terminal for sudo to prompt on, so honour SUDO_ASKPASS when it
+# is set and fail with the fix rather than "a terminal is required".
+SUDO=(sudo)
+if [ -n "${SUDO_ASKPASS:-}" ]; then
+  [ -x "$SUDO_ASKPASS" ] || die "SUDO_ASKPASS is set but not executable: $SUDO_ASKPASS"
+  SUDO=(sudo -A)
+fi
+need_root() {
+  "${SUDO[@]}" -n true 2>/dev/null && return 0
+  "${SUDO[@]}" true 2>/dev/null && return 0
+  die "cannot get root. Run 'sudo -v' first, or set SUDO_ASKPASS to a helper
+       that prints the password (see docs/VALIDATOR.md)."
+}
+
 case "$(uname -s)" in
   Darwin) OS=darwin ;;
   Linux)  OS=linux  ;;
@@ -81,12 +96,32 @@ fi
 printf '  SHA256SUMS ok, and matches the signed feed\n'
 
 say "Installing"
+need_root
 tar -xzf "$FILE"
 DIR="${FILE%.tar.gz}"
 if [ "$OS" = darwin ]; then ROOT=/usr/local/6529-validator; else ROOT=/opt/6529-validator; fi
-sudo mkdir -p "$ROOT" /usr/local/bin
-sudo cp -R "$DIR" "$ROOT/"
-sudo ln -sfn "$ROOT/$DIR/validator" /usr/local/bin/validator
+"${SUDO[@]}" mkdir -p "$ROOT" /usr/local/bin
+
+# Every release candidate ships as version "0.1.0", so the tarball's own
+# directory name is identical for rc.12 and rc.13. Installing it verbatim
+# overwrites the running version and destroys the rollback - which is exactly
+# what happened to us. Qualify the directory with the release instead, so
+# versions sit side by side and rolling back is a symlink change.
+DEST="$ROOT/validator-$REL-$TARGET"
+[ -n "$REL" ] || die "no release version to install under"
+"${SUDO[@]}" rm -rf -- "$DEST.incoming"
+"${SUDO[@]}" cp -R "$DIR" "$DEST.incoming"
+if [ -e "$DEST" ]; then
+  printf '  %s is already installed; replacing it\n' "$REL"
+  "${SUDO[@]}" rm -rf -- "$DEST"
+fi
+"${SUDO[@]}" mv -- "$DEST.incoming" "$DEST"
+PREV="$(readlink /usr/local/bin/validator 2>/dev/null || true)"
+"${SUDO[@]}" ln -sfn "$DEST/validator" /usr/local/bin/validator
+if [ -n "$PREV" ] && [ "$PREV" != "$DEST/validator" ]; then
+  printf '  previous build kept at %s\n' "${PREV%/validator}"
+  printf '  roll back with: sudo ln -sfn %s /usr/local/bin/validator\n' "$PREV"
+fi
 validator --version
 
 cat <<NEXT

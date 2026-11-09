@@ -562,6 +562,50 @@ def cmd_mentions(args) -> int:
     return 0
 
 
+def cmd_correct(args) -> int:
+    """Stage a correction of something this agent already said.
+
+    Ordinary replies are blocked from answering the same drop twice and from
+    replying to the agent's own drops. Both are right, and together they left
+    no way to retract a false statement - so a wrong answer stayed up. This
+    path exists for exactly that, is never taken automatically, and still
+    passes every publish gate.
+    """
+    cfg = pol.load_config()
+    store = Store()
+    api = build_api(cfg)
+
+    parent = api.drop(args.drop_id)
+    wave = parent.get("wave") or {}
+    wid = wave.get("id")
+    if wid not in {w.get("id") for w in cfg.get("waves", [])}:
+        out({"staged": False, "error": "wave_not_in_allowlist", "wave_id": wid})
+        return 3
+    if not store.already_replied_to(args.drop_id):
+        out({"staged": False, "error": "nothing_to_correct",
+             "detail": "no reply to this drop was published from here",
+             "fix": f"6529 respond {args.drop_id} --content ..."})
+        return 3
+
+    cdid = pub.stage_drop(store, wid, args.content,
+                          reply_to={"drop_id": args.drop_id,
+                                    "drop_part_id": args.reply_part})
+    full_wave = api.wave(wid)
+    elig = c.SixtyFiveClient.chat_eligibility(full_wave, is_reply=True)
+    decision = pol.can_publish(cfg, store, wid, True, elig, args.content,
+                               args.drop_id, correcting=True)
+    out({
+        "staged": True,
+        "correcting": args.drop_id,
+        "client_drop_id": cdid,
+        "wave_id": wid,
+        "would_publish": decision.allowed,
+        "blocking_reasons": decision.reasons,
+        "next": f"6529 publish {cdid}" if decision.allowed else None,
+    })
+    return 0
+
+
 def cmd_respond(args) -> int:
     """Stage a reply to one mention. Publishing stays a separate gated step."""
     cfg = pol.load_config()
@@ -1109,6 +1153,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp = sub.add_parser("doctor",
                         help="check for split state, stale session, dead models")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("correct",
+                        help="correct something you already said in a thread")
+    sp.add_argument("drop_id", help="the drop your wrong reply answered")
+    sp.add_argument("--content", required=True)
+    sp.add_argument("--reply-part", type=int, default=1)
+    sp.set_defaults(fn=cmd_correct)
 
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)

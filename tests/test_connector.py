@@ -1807,3 +1807,47 @@ def test_process_table_unreadable_is_unknown_not_false(monkeypatch):
     monkeypatch.setattr(val.subprocess, "run", boom)
     svc = val.service_process()
     assert svc["running"] is None
+
+
+# ------------------------------------------------- self-correction
+def test_a_correction_is_the_one_allowed_second_reply(store, monkeypatch):
+    """The duplicate guard and the no-self-reply guard together left no way to
+    retract a false statement, so a wrong answer stayed up in public. That is
+    worse than the duplicate either guard prevents."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    monkeypatch.setattr(store, "already_replied_to", lambda d: True)
+    cfg = live_cfg()
+
+    blocked = pol.can_publish(cfg, store, WAVE, True, ELIGIBLE, "again",
+                              "parent-1")
+    assert "already_replied_to_this_drop" in blocked.reasons
+
+    fixed = pol.can_publish(cfg, store, WAVE, True, ELIGIBLE,
+                            "correction: I was wrong", "parent-1",
+                            correcting=True)
+    assert fixed.allowed, fixed.reasons
+
+
+def test_correcting_does_not_bypass_any_other_gate(store, monkeypatch):
+    """It lifts the duplicate guard and nothing else."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    monkeypatch.setattr(store, "already_replied_to", lambda d: True)
+
+    paused = pol.can_publish(live_cfg(mode="observe"), store, WAVE, True,
+                             ELIGIBLE, "x", "p1", correcting=True)
+    assert not paused.allowed
+
+    off_list = pol.can_publish(live_cfg(), store, "not-allowlisted", True,
+                               ELIGIBLE, "x", "p1", correcting=True)
+    assert "wave_not_in_allowlist" in off_list.reasons
+
+    ineligible = pol.can_publish(
+        live_cfg(), store, WAVE, True,
+        {"eligible": False, "reasons": ["chat_disabled"]}, "x", "p1",
+        correcting=True)
+    assert not ineligible.allowed
+
+    linked = pol.can_publish(live_cfg(), store, WAVE, True, ELIGIBLE,
+                             "see https://evil.example/x", "p1",
+                             correcting=True)
+    assert not linked.allowed
