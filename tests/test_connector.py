@@ -343,7 +343,7 @@ def test_links_blocked_when_wave_disallows(store, tmpstate, monkeypatch):
     elig = dict(ELIGIBLE, links_disabled=True)
     d = pol.can_publish(live_cfg(), store, WAVE, False, elig,
                         "see https://example.com")
-    assert "links_not_permitted" in d.reasons
+    assert any(r.startswith("links_not_permitted") for r in d.reasons)
 
 
 def test_daily_cap_and_cooldown(store, tmpstate, monkeypatch):
@@ -1651,3 +1651,84 @@ def test_cli_exposes_retraction(tmp_path, monkeypatch, capsys):
         assert m.db.execute("SELECT count(*) c FROM notes").fetchone()["c"] == 2
     finally:
         m.close()
+
+
+# ------------------------------------------------- link allowlist
+GATE_OPEN = {"gate_found": True, "public_posts_enabled": True, "source": "test"}
+
+
+def test_allowlisted_link_may_be_posted_while_links_stay_off(store, monkeypatch):
+    """Announcing your own commits must not require opening the door to
+    every link."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg(link_allowlist=[
+        "https://github.com/MeltedMindz/6529Agentic/commit/"])
+
+    ok = pol.can_publish(
+        cfg, store, WAVE, False, ELIGIBLE,
+        "shipped: https://github.com/MeltedMindz/6529Agentic/commit/538f610")
+    assert ok.allowed, ok.reasons
+
+    bad = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE,
+                          "see https://evil.example/x")
+    assert not bad.allowed
+    # the reason names the host that was refused, so this is debuggable
+    assert any("evil.example" in r for r in bad.reasons), bad.reasons
+
+
+def test_a_wave_that_forbids_links_overrides_the_local_allowlist(store, monkeypatch):
+    """The wave's own rule wins over local configuration, always."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg(link_allowlist=["https://github.com/"], allow_links=True)
+    d = pol.can_publish(cfg, store, WAVE, False,
+                        dict(ELIGIBLE, links_disabled=True),
+                        "https://github.com/MeltedMindz/6529Agentic")
+    assert not d.allowed
+    assert "links_not_permitted" in d.reasons
+
+
+def test_a_prefix_match_is_not_a_substring_match(store, monkeypatch):
+    """github.com.evil.test must not pass as github.com."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg(link_allowlist=["https://github.com/MeltedMindz/"])
+    d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE,
+                        "https://github.com.evil.test/MeltedMindz/x")
+    assert not d.allowed, d.reasons
+
+
+def test_a_link_with_no_scheme_is_still_a_link(store, monkeypatch):
+    """The gate matched only https:// , so "github.com/owner/repo" published
+    while allow_links was False. It is the form an agent reaches for when a
+    link is refused."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg()
+    d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE,
+                        "the tooling is open source: github.com/MeltedMindz/6529Agentic")
+    assert not d.allowed
+    assert any("github.com" in r for r in d.reasons), d.reasons
+
+
+def test_the_allowlist_matches_a_scheme_less_link_too(store, monkeypatch):
+    """Otherwise dropping the scheme would be a way around the allowlist."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg(link_allowlist=[
+        "https://github.com/MeltedMindz/6529Agentic/commit/"])
+    assert pol.can_publish(
+        cfg, store, WAVE, False, ELIGIBLE,
+        "shipped: github.com/MeltedMindz/6529Agentic/commit/538f610").allowed
+    # the repo root is NOT the commit prefix, in either form
+    for text in ("github.com/MeltedMindz/6529Agentic",
+                 "https://github.com/MeltedMindz/6529Agentic"):
+        assert not pol.can_publish(cfg, store, WAVE, False, ELIGIBLE,
+                                   text).allowed, text
+
+
+def test_a_domain_mentioned_in_prose_is_not_a_link(store, monkeypatch):
+    """Requiring a path keeps the gate from blocking ordinary speech."""
+    monkeypatch.setattr(pol, "framework_posting_gate", lambda: GATE_OPEN)
+    cfg = live_cfg()
+    for text in ("I post on 6529.io under my own identity",
+                 "see docs/API-REFERENCE.md for the routes",
+                 "upgrade to rc.12 when the app offers it"):
+        d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE, text)
+        assert d.allowed, (text, d.reasons)

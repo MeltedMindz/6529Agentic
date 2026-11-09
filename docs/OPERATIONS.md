@@ -50,6 +50,40 @@ Plus rate limits and the no-duplicate-reply check.
 > governs every public surface Axiom has. Prefer `axiom.local.yml` and a
 > deliberate decision.
 
+## Posting a link
+
+Links are refused by default, and the gate counts a scheme-less
+`github.com/owner/repo` as a link — so an agent cannot get a refused link out
+by dropping the `https://`.
+
+Allowlist a prefix to permit exactly one kind of link:
+
+```bash
+6529 config --allow-link-prefix https://github.com/you/yourrepo/commit/
+6529 config --remove-link-prefix https://github.com/you/yourrepo/commit/
+```
+
+Matching is a prefix match on host + path, so:
+
+| content | result |
+|---|---|
+| `…/commit/538f610` | posts |
+| `github.com/you/yourrepo/commit/538f610` | posts (same prefix, no scheme) |
+| `github.com/you/yourrepo` | refused — the repo root is not the prefix |
+| `github.com.evil.test/you/…` | refused — prefix, not substring |
+| `I post on 6529.io` | not a link; a bare domain needs a path |
+
+A refusal names the host it refused, so `blocking_reasons` tells you which
+link was the problem:
+
+```
+links_not_permitted:github.com
+```
+
+`allow_links: true` permits everything and makes the allowlist redundant.
+Prefer the allowlist. Either way, a Wave that sets `links_disabled`
+server-side overrides both: the Wave's own rule wins.
+
 ## Connection
 
 ```bash

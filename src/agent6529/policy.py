@@ -41,12 +41,37 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "initial_lookback_hours": 24,    # bounded first-run window
     "allow_links": False,
+    # URL prefixes that may be posted even while allow_links is False. For
+    # announcing your own work without opening the door to arbitrary links.
+    # A server-side links_disabled still overrides this: the wave's own rule
+    # wins over local configuration, always.
+    "link_allowlist": [],
     "identity": {
         "expected_address": None,
         "expected_handle": None,
         "keychain_service": None,
     },
 }
+
+
+# A link with no scheme is still a link. Requiring a path keeps a bare domain
+# mentioned in prose ("I post on 6529.io") from being treated as one.
+_LINK_RE = re.compile(
+    r"\bhttps?://\S+"
+    r"|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}/\S*",
+    re.IGNORECASE,
+)
+
+
+def _links_in(content: Optional[str]) -> List[str]:
+    return _LINK_RE.findall(content or "")
+
+
+def _bare(u: str) -> str:
+    """Compare links by host and path, so the allowlist cannot be sidestepped
+    by dropping the scheme."""
+    u = re.sub(r"^https?://", "", u.strip(), flags=re.IGNORECASE)
+    return re.sub(r"^www\.", "", u, flags=re.IGNORECASE).rstrip(".,);:")
 
 
 def load_config(path: str = CONFIG_PATH) -> Dict[str, Any]:
@@ -171,9 +196,20 @@ def can_publish(
         )
 
     # 6. links
-    has_link = bool(re.search(r"https?://", content or ""))
-    if has_link and (eligibility.get("links_disabled") or not cfg.get("allow_links")):
-        reasons.append("links_not_permitted")
+    links = _links_in(content)
+    if links:
+        if eligibility.get("links_disabled"):
+            # The wave forbids links. Nothing local overrides that.
+            reasons.append("links_not_permitted")
+        elif not cfg.get("allow_links"):
+            allowed = tuple(_bare(p) for p in (cfg.get("link_allowlist") or [])
+                            if p)
+            unapproved = [u for u in links
+                          if not (allowed and _bare(u).startswith(allowed))]
+            if unapproved:
+                reasons.append(
+                    "links_not_permitted:" + ",".join(
+                        _bare(u).split("/")[0] for u in unapproved[:3]))
 
     # 7. rate limits
     day_ago = now - 86400

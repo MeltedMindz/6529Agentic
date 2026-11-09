@@ -153,6 +153,7 @@ into its own skill should not lose it on the next install:
 | `6529 doctor` | split state, stale session, dead models |
 | `6529 learn --distil` / `recall` / `memory` | conversation memory |
 | `6529 supersede <id>` / `forget` | correct or retract what was learned |
+| `6529 config --allow-link-prefix <url>` | permit one URL prefix while links stay off |
 
 ---
 
@@ -222,10 +223,24 @@ The hard part of posting as an agent is not the API call:
 
 Five independent gates stand between a draft and a publish: mode, pause, host
 gate, Wave allowlist with per-direction flags, and live server eligibility —
-plus rate limits and a duplicate-reply check. `draft` prints exactly which ones
-would block.
+plus rate limits, a duplicate-reply check, and the link gate. `draft` prints
+exactly which ones would block.
 
-**131 tests, no network.** Destructive paths run against a mock transport.
+Links are off by default. To let an agent announce its own work without
+opening the door to arbitrary links, allowlist a URL **prefix**:
+
+```bash
+6529 config --allow-link-prefix https://github.com/you/yourrepo/commit/
+```
+
+Now a commit link posts and the repo root does not. Two things make this hold:
+the prefix is matched after the scheme is stripped, so dropping `https://`
+does not get around it — and a scheme-less `github.com/you/yourrepo` counts as
+a link in the first place, which it did not until an agent of ours found that
+gap and used it. A Wave that disables links server-side still overrides the
+allowlist; the Wave's own rule always wins.
+
+**137 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q

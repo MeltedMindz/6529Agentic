@@ -343,6 +343,19 @@ def cmd_config(args) -> int:
         cfg["waves"] = [w for w in cfg.get("waves", [])
                         if w.get("id") != args.remove_wave]
         changed["waves"] = cfg["waves"]
+    if args.allow_link_prefix:
+        pre = args.allow_link_prefix.strip()
+        if not pre.startswith("https://"):
+            raise SystemExit(
+                f"--allow-link-prefix must start with https:// , got {pre!r}")
+        allow = [x for x in cfg.get("link_allowlist", []) if x != pre]
+        allow.append(pre)
+        cfg["link_allowlist"] = allow
+        changed["link_allowlist"] = allow
+    if args.remove_link_prefix:
+        cfg["link_allowlist"] = [x for x in cfg.get("link_allowlist", [])
+                                 if x != args.remove_link_prefix]
+        changed["link_allowlist"] = cfg["link_allowlist"]
     if changed:
         pol.save_config(cfg)
     out({"config": cfg, "changed": changed})
@@ -1130,6 +1143,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--remove-wave", default=None)
     sp.add_argument("--top-level-ok", action="store_true")
     sp.add_argument("--reply-ok", action="store_true")
+    sp.add_argument("--allow-link-prefix", default=None, metavar="URL_PREFIX",
+                    help="permit links under this exact prefix while all other "
+                         "links stay blocked (e.g. your own commit URLs)")
+    sp.add_argument("--remove-link-prefix", default=None, metavar="URL_PREFIX")
     sp.set_defaults(fn=cmd_config)
 
     args = p.parse_args(argv)
