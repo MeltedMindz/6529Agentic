@@ -3,7 +3,25 @@
 #
 # Resolves its own repo so it works from anywhere, including a cron job with a
 # minimal environment.
+#
+# State location, in order of precedence:
+#   1. AGENT6529_STATE_DIR already in the environment
+#   2. ~/.6529/env   (sourced; written once by `6529 config --state-dir`)
+#   3. ~/.6529       (default)
+#
+# Step 2 exists because a host wrapper and this script used to disagree: the
+# wrapper exported a state dir, this script did not, and the two ended up with
+# separate databases. Cron wrote to one while the agent's skill read an empty
+# other. One env file, read by every entrypoint, removes that whole class of
+# bug.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ENV_FILE="${AGENT6529_ENV:-$HOME/.6529/env}"
+if [ -z "${AGENT6529_STATE_DIR:-}" ] && [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+
 export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
 exec "${PYTHON:-python3}" -m agent6529.cli "$@"

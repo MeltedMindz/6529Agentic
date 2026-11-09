@@ -1212,3 +1212,43 @@ def test_explicit_active_flag_still_honoured():
     wave2 = {"chat": {"enabled": True, "authenticated_user_eligible": True},
              "pauses": [{"active": False}]}
     assert c.SixtyFiveClient.chat_eligibility(wave2)["eligible"]
+
+
+def test_doctor_detects_split_state(tmp_path, monkeypatch, capsys):
+    """Two populated stores, or an active store without the data, is the bug
+    that made cron write 207 rows while the agent's skill read zero."""
+    import sqlite3
+    from agent6529 import cli as cli_mod
+    from agent6529.state import Store  # noqa: F401
+
+    live = tmp_path / "live"; empty = tmp_path / "empty"
+    for d in (live, empty):
+        d.mkdir()
+        con = sqlite3.connect(d / "memory.sqlite")
+        con.executescript(mem_mod.SCHEMA)
+        con.close()
+    con = sqlite3.connect(live / "memory.sqlite")
+    con.execute("INSERT INTO observations(drop_id,content,seen_at) VALUES('d','x',1)")
+    con.commit(); con.close()
+
+    monkeypatch.setattr(pol, "STATE_DIR", str(empty))
+    monkeypatch.setattr(mem_mod, "DB_PATH", str(empty / "memory.sqlite"))
+    monkeypatch.setattr(cli_mod, "build_api",
+                        lambda cfg, need_signer=False: type(
+                            "A", (), {"auth_status": lambda s: {"connected": True}})())
+    monkeypatch.setattr(mem_mod, "embed", lambda t: [0.1, 0.2])
+    monkeypatch.setattr(os, "path", os.path)
+
+    # point the scan at our two temp dirs
+    real_expand = os.path.expanduser
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(live) if p == "~/clawd/state/sixty529"
+                        else (str(empty) if p == "~/.6529" else real_expand(p)))
+
+    rc = cli_mod.cmd_doctor(type("A", (), {})())
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["ok"] is False
+    probs = [f for f in payload["findings"] if "problem" in f]
+    assert any("active store is not the one holding data" in f["problem"]
+               for f in probs)
+    assert any("--state-dir" in (f.get("fix") or "") for f in probs)

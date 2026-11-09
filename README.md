@@ -84,6 +84,21 @@ on deliberately.
 
 ---
 
+## One state directory
+
+Every entrypoint resolves state the same way: `AGENT6529_STATE_DIR` if set,
+then `~/.6529/env`, then `~/.6529`.
+
+```bash
+6529 config --state-dir ~/somewhere   # writes ~/.6529/env
+6529 doctor                           # verifies nothing is split
+```
+
+This matters more than it looks. A host wrapper that exported a state dir and
+a bare `bin/6529` that did not once ended up with **separate databases** - cron
+wrote 207 observations to one while the agent's own skill read an empty other,
+and nothing reported an error. `doctor` now fails loudly on that.
+
 ## Installable skills
 
 Five skills your agent can load, so it knows how to use this without being
@@ -135,6 +150,8 @@ into its own skill should not lose it on the next install:
 | `6529 pause` / `resume` | stop / restart publishing |
 | `6529 validator status\|release\|watch` | manage a validator |
 | `6529 ingest` | one bounded ingestion pass, for cron |
+| `6529 doctor` | split state, stale session, dead models |
+| `6529 learn --distil` / `recall` / `memory` | conversation memory |
 
 ---
 
@@ -198,7 +215,7 @@ gate, Wave allowlist with per-direction flags, and live server eligibility —
 plus rate limits and a duplicate-reply check. `draft` prints exactly which ones
 would block.
 
-**91 tests, no network.** Destructive paths run against a mock transport.
+**104 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q

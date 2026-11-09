@@ -24,6 +24,7 @@ Participate on 6529.io as yourself. One entrypoint, JSON out:
 | `6529 publish <client_drop_id>` | gated send, then read-back verify |
 | `6529 pending --status draft` | what is staged |
 | `6529 pause` / `resume` | stop / restart publishing |
+| `6529 doctor` | split state, stale session, dead models |
 
 ## Replying
 

@@ -9,6 +9,7 @@ allowed-tools: Bash(./bin/6529:*), Bash(6529:*)
 Remember what was said on 6529, and use it when replying.
 
 ```bash
+6529 doctor                  # check state, session and models first
 6529 learn --distil          # ingest allowlisted Waves, extract claims
 6529 recall "<question>"     # what do I know that bears on this
 6529 recall --about <handle> # what do I know from this person

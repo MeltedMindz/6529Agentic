@@ -294,6 +294,19 @@ def cmd_config(args) -> int:
             raise SystemExit(f"mode must be one of {pol.MODES}")
         cfg["mode"] = args.mode
         changed["mode"] = args.mode
+    if args.state_dir:
+        d = os.path.abspath(os.path.expanduser(args.state_dir))
+        os.makedirs(d, exist_ok=True)
+        env_file = os.environ.get("AGENT6529_ENV",
+                                  os.path.expanduser("~/.6529/env"))
+        os.makedirs(os.path.dirname(env_file), exist_ok=True)
+        with open(env_file, "w", encoding="utf-8") as fh:
+            fh.write("# written by `6529 config --state-dir`. Every entrypoint\n"
+                     "# reads this, so a wrapper and the bare binary cannot\n"
+                     "# end up with separate databases.\n"
+                     f'export AGENT6529_STATE_DIR="{d}"\n')
+        changed["state_dir"] = d
+        changed["env_file"] = env_file
     if args.signer:
         cfg.setdefault("identity", {})["signer"] = args.signer
         changed["signer"] = args.signer
@@ -838,6 +851,94 @@ def cmd_memory(args) -> int:
     return 0
 
 
+
+def cmd_doctor(args) -> int:
+    """Check the mistakes that silently break this: split state, stale
+    session, unreachable local models, runaway learning backlog."""
+    import sqlite3
+    from agent6529 import memory as mem_mod
+
+    cfg = pol.load_config()
+    state = os.path.realpath(pol.STATE_DIR)
+    findings, ok = [], True
+
+    def obs_count(d):
+        db = os.path.join(d, "memory.sqlite")
+        if not os.path.exists(db):
+            return None
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            n = con.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+            con.close()
+            return n
+        except Exception:
+            return -1
+
+    # 1. Split state. Two populated stores, or an active store that is not the
+    #    one holding the data, means something is writing where nothing reads.
+    seen, counts = set(), {}
+    for d in ("~/.6529", "~/clawd/state/sixty529", pol.STATE_DIR):
+        rd = os.path.realpath(os.path.expanduser(d))
+        if rd in seen:
+            continue
+        seen.add(rd)
+        n = obs_count(rd)
+        if n is not None:
+            counts[rd] = n
+    with_data = [d for d, n in counts.items() if n and n > 0]
+    if len(with_data) > 1:
+        ok = False
+        findings.append({"problem": "split state: more than one populated store",
+                         "stores": counts, "active": state,
+                         "fix": "6529 config --state-dir <the one with your data>"})
+    elif with_data and with_data[0] != state:
+        ok = False
+        findings.append({"problem": "active store is not the one holding data",
+                         "stores": counts, "active": state,
+                         "fix": f"6529 config --state-dir {with_data[0]}"})
+    else:
+        findings.append({"state_dir": state, "stores": counts})
+
+    env_file = os.environ.get("AGENT6529_ENV", os.path.expanduser("~/.6529/env"))
+    findings.append({"env_file": env_file, "exists": os.path.exists(env_file)})
+
+    # 2. Session
+    auth = build_api(cfg).auth_status()
+    if not auth.get("connected"):
+        ok = False
+        findings.append({"problem": "not connected", "fix": "6529 connect"})
+    else:
+        findings.append({"connected_as": auth.get("address"),
+                         "acting_as_self": auth.get("acting_as_self")})
+
+    # 3. Local models, which memory depends on
+    try:
+        mem_mod.embed("doctor probe")
+        findings.append({"embeddings": "ok", "model": mem_mod.EMBED_MODEL})
+    except Exception as e:
+        ok = False
+        findings.append({"problem": "embedding model unreachable",
+                         "detail": str(e)[:160],
+                         "effect": "recall degrades to keyword matching"})
+
+    # 4. Backlog
+    try:
+        m = mem_mod.Memory()
+        st = m.stats()
+        m.close()
+        findings.append({"memory": st})
+        if st["pending_learning"] > 200:
+            ok = False
+            findings.append({"problem": "learning backlog",
+                             "pending": st["pending_learning"],
+                             "fix": "6529 learn --distil --distil-limit 200"})
+    except Exception as e:
+        findings.append({"memory_error": str(e)[:160]})
+
+    out({"ok": ok, "findings": findings})
+    return 0 if ok else 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="6529",
                                 description="Axiom 6529.io connector")
@@ -950,6 +1051,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--limit", type=int, default=5)
     sp.set_defaults(fn=cmd_recall)
 
+    sp = sub.add_parser("doctor",
+                        help="check for split state, stale session, dead models")
+    sp.set_defaults(fn=cmd_doctor)
+
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)
 
@@ -963,6 +1068,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--mode", default=None, choices=list(pol.MODES))
     sp.add_argument("--keychain-service", default=None)
     sp.add_argument("--signer", default=None, choices=["bankr", "keychain"])
+    sp.add_argument("--state-dir", default=None,
+                    help="where state lives; written to ~/.6529/env for all entrypoints")
     sp.add_argument("--expected-address", default=None)
     sp.add_argument("--add-wave", default=None, metavar="ID[:NAME]")
     sp.add_argument("--wave-name", default=None,
