@@ -1743,3 +1743,67 @@ def test_a_domain_mentioned_in_prose_is_not_a_link(store, monkeypatch):
                  "upgrade to rc.12 when the app offers it"):
         d = pol.can_publish(cfg, store, WAVE, False, ELIGIBLE, text)
         assert d.allowed, (text, d.reasons)
+
+
+# ------------------------------------------------- validator self-knowledge
+DENIED = ('validator status: only the service\'s account may read '
+          '"/Library/Application Support/6529-validator". '
+          'Try: sudo -u _validator6529 validator status '
+          '--data-dir "/Library/Application Support/6529-validator"')
+
+
+def _denied_run(monkeypatch, running):
+    import subprocess as sp
+
+    class R:
+        returncode = 1
+        stdout = ""
+        stderr = DENIED
+
+    monkeypatch.setattr(val, "_run", lambda *a, **k: R())
+    monkeypatch.setattr(val, "installed_version", lambda *a, **k: "0.1.0-rc.12")
+
+    def fake_ps(args, **kw):
+        out = ("_validator6529 75605 /usr/local/bin/validator run --data-dir "
+               "/Library/Application Support/6529-validator --no-browser\n"
+               "axiom 999 /bin/zsh -c validator status\n") if running else \
+              "axiom 999 /bin/zsh -c validator status\n"
+        return sp.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(val.subprocess, "run", fake_ps)
+
+
+def test_unreadable_data_dir_does_not_mean_no_validator(monkeypatch):
+    """The failure that mattered: "cannot read the data directory" was read as
+    "I do not run a validator", and the agent said so in public while its
+    validator was running."""
+    _denied_run(monkeypatch, running=True)
+    st_ = val.status()
+    assert st_["permission_denied"] is True
+    assert st_["running"] is True, "a running validator must be reported as running"
+    assert st_["service_pid"] == 75605
+    assert st_["installed_version"] == "0.1.0-rc.12"
+    assert "IS running" in st_["meaning"]
+
+
+def test_unreadable_data_dir_with_nothing_running_says_so(monkeypatch):
+    _denied_run(monkeypatch, running=False)
+    st_ = val.status()
+    assert st_["running"] is False
+    assert "no validator process is running" in st_["meaning"]
+
+
+def test_a_status_invocation_is_not_mistaken_for_the_service(monkeypatch):
+    """`validator status` in someone's shell must not count as the service."""
+    _denied_run(monkeypatch, running=False)
+    assert val.service_process()["running"] is False
+
+
+def test_process_table_unreadable_is_unknown_not_false(monkeypatch):
+    """Not knowing is its own answer. Reporting False here would recreate the
+    exact bug in a different place."""
+    def boom(*a, **k):
+        raise OSError("no ps")
+    monkeypatch.setattr(val.subprocess, "run", boom)
+    svc = val.service_process()
+    assert svc["running"] is None

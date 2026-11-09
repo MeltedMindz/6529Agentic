@@ -245,6 +245,37 @@ def _run(args: List[str], data_dir: Optional[str] = None,
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+def service_process(binary: str = VALIDATOR_BIN) -> Dict[str, Any]:
+    """Is a validator actually running, as seen from any account.
+
+    The data directory is readable only by the service account, but the
+    process table is not. This is the one question that must never be
+    answered by inference: an agent that cannot read the ledger still needs
+    to know it is running a validator before it says otherwise in public.
+    """
+    name = os.path.basename(binary)
+    try:
+        r = subprocess.run(["ps", "-axo", "user=,pid=,args="],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return {"running": None, "pid": None, "user": None,
+                "detail": "could not read the process table"}
+    for line in (r.stdout or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        user, pid, args = parts
+        # the service command, not someone's `validator status` invocation
+        if re.search(rf"(^|/){re.escape(name)}\s", args + " ") and " run" in args:
+            try:
+                pid_i: Optional[int] = int(pid)
+            except ValueError:
+                pid_i = None
+            return {"running": True, "pid": pid_i, "user": user,
+                    "detail": args[:200]}
+    return {"running": False, "pid": None, "user": None, "detail": None}
+
+
 def status(data_dir: Optional[str] = None, binary: str = VALIDATOR_BIN,
            as_json: bool = True) -> Dict[str, Any]:
     """Run `validator status` and interpret the documented exit codes."""
@@ -268,13 +299,32 @@ def status(data_dir: Optional[str] = None, binary: str = VALIDATOR_BIN,
         hint = f"sudo -u {user} validator status"
         if dd:
             hint += f' --data-dir "{dd.group(1)}"'
+        svc = service_process(binary)
+        ver = installed_version(binary)
+        if svc.get("running"):
+            meaning = (
+                f"the validator IS running (pid {svc.get('pid')}, as "
+                f"{svc.get('user')}); this account cannot read its data "
+                "directory, so whether it is counting is unknown from here")
+        elif svc.get("running") is False:
+            meaning = ("no validator process is running, and this account "
+                       "cannot read the data directory either")
+        else:
+            meaning = ("cannot read the validator data directory from this "
+                       "account, and the process table was unreadable")
         return {
             "exit_code": r.returncode,
             "healthy": None,
             "needs_attention": False,
-            "meaning": "cannot read the validator data directory from this account",
+            # Answer the question directly. "cannot read the data directory"
+            # was being read as "I do not run a validator", which an agent
+            # then said out loud in public. These two keys are the facts.
+            "running": svc.get("running"),
+            "installed_version": ver,
+            "meaning": meaning,
             "permission_denied": True,
             "run_as": user,
+            "service_pid": svc.get("pid"),
             "hint": hint,
             "alerts": None,
             "raw": text.strip()[:500],
