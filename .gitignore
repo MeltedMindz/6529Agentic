@@ -14,3 +14,7 @@ session.json
 config.json
 gate.local.yml
 PAUSED
+
+# Graph exports contain real memory content. The viewer ships; the data does not.
+graph.json
+viewer/graph.json

@@ -1,0 +1,801 @@
+<title>Axiom's Memory Graph</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ink:#0b1020; --surface:#141c2e; --surface-2:#1b2338; --line:#26324c;
+  --line-soft:#1d2740; --text:#e8eefb; --text-dim:#93a3c4; --text-faint:#64739a;
+  --sel:#22d3ee;
+  --t-self:#4fd1c5; --t-operator:#a78bfa; --t-world:#60a5fa;
+  --t-selfnote:#fbbf24; --t-third:#f87171;
+  --person:#cbd5e1; --surface-node:#7c8db5;
+  --shadow:0 18px 50px -24px rgba(0,0,0,.85);
+  --rail:300px; --inspector:360px;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --ink:#f6f8fc; --surface:#ffffff; --surface-2:#eef2f9; --line:#d3dcea;
+    --line-soft:#e3e9f3; --text:#111a2e; --text-dim:#4d5c7a; --text-faint:#75829f;
+    --sel:#0e7490;
+    --t-self:#0d9488; --t-operator:#7c3aed; --t-world:#2563eb;
+    --t-selfnote:#b45309; --t-third:#dc2626;
+    --person:#475569; --surface-node:#64748b;
+    --shadow:0 18px 50px -28px rgba(15,23,42,.28);
+  }
+}
+:root[data-theme="light"]{
+  --ink:#f6f8fc; --surface:#ffffff; --surface-2:#eef2f9; --line:#d3dcea;
+  --line-soft:#e3e9f3; --text:#111a2e; --text-dim:#4d5c7a; --text-faint:#75829f;
+  --sel:#0e7490;
+  --t-self:#0d9488; --t-operator:#7c3aed; --t-world:#2563eb;
+  --t-selfnote:#b45309; --t-third:#dc2626;
+  --person:#475569; --surface-node:#64748b;
+  --shadow:0 18px 50px -28px rgba(15,23,42,.28);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ink); color:var(--text);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:14px; line-height:1.5; overflow:hidden;
+}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px;border-radius:3px}
+
+/* ---------- shell ---------- */
+#app{display:grid;grid-template-columns:var(--rail) 1fr;height:100vh;height:100dvh}
+#stage{position:relative;min-width:0}
+canvas{display:block;width:100%;height:100%;cursor:grab}
+canvas.dragging{cursor:grabbing}
+
+/* ---------- rail ---------- */
+#rail{
+  background:var(--surface); border-right:1px solid var(--line);
+  display:flex; flex-direction:column; min-height:0;
+}
+.rail-head{padding:18px 18px 14px;border-bottom:1px solid var(--line-soft)}
+h1{
+  margin:0; font-size:17px; font-weight:600; letter-spacing:-.01em;
+  text-wrap:balance;
+}
+.sub{margin:4px 0 0;color:var(--text-faint);font-size:11.5px;letter-spacing:.02em}
+.rail-scroll{overflow-y:auto;padding:4px 18px 18px;flex:1;min-height:0}
+.eyebrow{
+  font-size:10px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--text-faint); margin:20px 0 9px;
+}
+.eyebrow:first-child{margin-top:16px}
+
+.counts{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line-soft);
+  border:1px solid var(--line-soft);border-radius:6px;overflow:hidden}
+.count{background:var(--surface);padding:9px 11px}
+.count b{display:block;font-family:"IBM Plex Mono",monospace;font-size:19px;
+  font-weight:500;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.count span{font-size:10.5px;color:var(--text-faint);letter-spacing:.03em}
+.count.warn b{color:var(--t-third)}
+
+#q{
+  width:100%;padding:8px 10px;background:var(--ink);color:var(--text);
+  border:1px solid var(--line);border-radius:6px;
+  font-family:"IBM Plex Mono",monospace;font-size:12px;
+}
+#q::placeholder{color:var(--text-faint)}
+
+.legend{display:flex;flex-direction:column;gap:1px}
+.leg{
+  display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:5px;
+  width:100%;text-align:left;font-size:12.5px;transition:background .12s;
+}
+.leg:hover{background:var(--surface-2)}
+.leg[aria-pressed="false"]{opacity:.38}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.dot.ring{background:transparent;border:1.5px dashed var(--t-third)}
+.leg .n{margin-left:auto;color:var(--text-faint);font-family:"IBM Plex Mono",monospace;
+  font-size:11px;font-variant-numeric:tabular-nums}
+.leg .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.note-why{
+  font-size:11.5px;color:var(--text-dim);margin:9px 0 0;padding:9px 11px;
+  background:var(--surface-2);border-radius:6px;border-left:2px solid var(--t-third);
+}
+
+/* ---------- toolbar over the canvas ---------- */
+.toolbar{
+  position:absolute;top:14px;left:14px;right:14px;display:flex;gap:8px;
+  align-items:center;pointer-events:none;z-index:3;flex-wrap:wrap;
+}
+.tool{
+  pointer-events:auto;background:color-mix(in srgb,var(--surface) 88%,transparent);
+  border:1px solid var(--line);border-radius:7px;padding:6px 11px;font-size:12px;
+  backdrop-filter:blur(8px);display:inline-flex;align-items:center;gap:7px;
+  transition:border-color .12s,color .12s;
+}
+.tool:hover{border-color:var(--sel)}
+.tool[aria-pressed="true"]{border-color:var(--sel);color:var(--sel)}
+.tool.static{cursor:default}
+.tool.static:hover{border-color:var(--line)}
+.spacer{flex:1}
+
+/* ---------- time scrubber ---------- */
+.scrub{
+  position:absolute;left:14px;right:14px;bottom:14px;z-index:3;
+  background:color-mix(in srgb,var(--surface) 92%,transparent);
+  border:1px solid var(--line);border-radius:9px;padding:11px 14px 9px;
+  backdrop-filter:blur(8px);display:flex;flex-direction:column;gap:7px;
+}
+.scrub-top{display:flex;align-items:center;gap:12px}
+.scrub-label{font-size:11px;color:var(--text-faint);letter-spacing:.06em;
+  text-transform:uppercase;font-weight:600}
+.scrub-when{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--text-dim);
+  font-variant-numeric:tabular-nums;margin-left:auto}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;
+  background:var(--line);outline:none;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--sel);cursor:pointer;border:2px solid var(--surface);
+}
+input[type=range]::-moz-range-thumb{
+  width:14px;height:14px;border-radius:50%;background:var(--sel);cursor:pointer;
+  border:2px solid var(--surface);
+}
+.sparkline{display:block;width:100%;height:26px}
+
+/* ---------- inspector ---------- */
+#inspector{
+  position:absolute;top:0;right:0;bottom:0;width:var(--inspector);max-width:88vw;
+  background:var(--surface);border-left:1px solid var(--line);box-shadow:var(--shadow);
+  transform:translateX(101%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+  z-index:5;display:flex;flex-direction:column;
+}
+#inspector.open{transform:none}
+@media (prefers-reduced-motion:reduce){#inspector{transition:none}}
+.insp-head{
+  padding:14px 16px;border-bottom:1px solid var(--line-soft);
+  display:flex;align-items:flex-start;gap:10px;
+}
+.insp-kind{font-size:10px;font-weight:600;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--text-faint)}
+.insp-body{overflow-y:auto;padding:16px;flex:1;min-height:0}
+.close{font-size:19px;line-height:1;color:var(--text-faint);padding:0 2px}
+.close:hover{color:var(--text)}
+.claim{font-size:15px;line-height:1.5;margin:0 0 14px;text-wrap:pretty}
+.badge{
+  display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:500;
+  padding:3px 9px;border-radius:999px;border:1px solid currentColor;
+}
+.badge.ok{color:var(--t-self)}
+.badge.no{color:var(--t-third)}
+.kv{display:grid;grid-template-columns:86px 1fr;gap:7px 12px;margin:14px 0 0;
+  font-size:12.5px;align-items:baseline}
+.kv dt{color:var(--text-faint);font-size:11px;letter-spacing:.03em;
+  text-transform:uppercase;font-weight:600}
+.kv dd{margin:0;font-family:"IBM Plex Mono",monospace;overflow-wrap:anywhere}
+.src{
+  margin:14px 0 0;padding:11px 12px;background:var(--ink);border:1px solid var(--line-soft);
+  border-radius:6px;font-size:12.5px;color:var(--text-dim);line-height:1.55;
+  max-height:160px;overflow-y:auto;
+}
+.neighbours{list-style:none;margin:9px 0 0;padding:0;display:flex;
+  flex-direction:column;gap:1px}
+.neighbours button{
+  display:flex;gap:9px;align-items:baseline;width:100%;text-align:left;
+  padding:7px 9px;border-radius:5px;font-size:12.5px;line-height:1.4;
+}
+.neighbours button:hover{background:var(--surface-2)}
+.neighbours .w{font-family:"IBM Plex Mono",monospace;font-size:11px;
+  color:var(--text-faint);flex:none;font-variant-numeric:tabular-nums}
+.rel{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);
+  flex:none;width:62px}
+
+#empty{
+  position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:32px;
+}
+#empty.show{display:grid}
+#empty p{max-width:34ch;color:var(--text-dim);margin:10px 0 0;font-size:13px}
+label.file{
+  display:inline-block;margin-top:16px;padding:8px 14px;border:1px solid var(--line);
+  border-radius:7px;font-size:12.5px;cursor:pointer;
+}
+label.file:hover{border-color:var(--sel);color:var(--sel)}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+
+@media (max-width:860px){
+  #app{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  #rail{border-right:none;border-bottom:1px solid var(--line);max-height:38vh}
+  :root{--inspector:100%}
+}
+</style>
+
+<div id="app">
+  <aside id="rail">
+    <div class="rail-head">
+      <h1>Axiom's Memory Graph</h1>
+      <p class="sub mono" id="stamp">loading</p>
+    </div>
+    <div class="rail-scroll">
+      <div class="eyebrow">Held</div>
+      <div class="counts" id="counts"></div>
+
+      <div class="eyebrow">Find</div>
+      <input id="q" type="search" placeholder="handle, claim, rc.13&hellip;"
+             autocomplete="off" spellcheck="false">
+
+      <div class="eyebrow">Who was entitled to say it</div>
+      <div class="legend" id="tiers"></div>
+      <p class="note-why">A claim about a person is recalled only from that
+        person, the operator, or their own post. Anything else is held for the
+        record and never returned &mdash; those are the dashed ones.</p>
+
+      <div class="eyebrow">Said where</div>
+      <div class="legend" id="surfaces"></div>
+
+      <div class="eyebrow">Links</div>
+      <div class="legend" id="rels"></div>
+    </div>
+  </aside>
+
+  <div id="stage">
+    <canvas id="c"></canvas>
+
+    <div class="toolbar">
+      <button class="tool" id="btn-fit" title="Fit all nodes in view">Fit</button>
+      <button class="tool" id="btn-people" aria-pressed="true">People</button>
+      <button class="tool" id="btn-sim" aria-pressed="true">Similarity</button>
+      <button class="tool" id="btn-withheld" aria-pressed="true">Withheld</button>
+      <div class="spacer"></div>
+      <span class="tool static mono" id="readout">&mdash;</span>
+    </div>
+
+    <div class="scrub" id="scrub">
+      <div class="scrub-top">
+        <button class="tool" id="btn-play" style="padding:4px 10px">&#9654; Replay growth</button>
+        <span class="scrub-label">Accumulation</span>
+        <span class="scrub-when mono" id="when">all</span>
+      </div>
+      <input type="range" id="time" min="0" max="1000" value="1000" step="1"
+             aria-label="Show memory as it stood at a point in time">
+      <svg class="sparkline" id="spark" aria-hidden="true"></svg>
+    </div>
+
+    <div id="empty">
+      <div>
+        <div class="eyebrow" style="margin:0">No graph loaded</div>
+        <p>Generate one next to this page with
+          <code class="mono">scripts/memory-graph.py -o graph.json</code>,
+          then load it here. Nothing leaves your machine.</p>
+        <label class="file">Load graph.json
+          <input type="file" id="file" accept="application/json,.json">
+        </label>
+      </div>
+    </div>
+
+    <aside id="inspector" aria-live="polite">
+      <div class="insp-head">
+        <div style="flex:1;min-width:0">
+          <div class="insp-kind" id="insp-kind">Note</div>
+          <div class="mono" id="insp-id" style="font-size:11px;color:var(--text-faint)"></div>
+        </div>
+        <button class="close" id="insp-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="insp-body" id="insp-body"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+"use strict";
+const TIERS = {
+  self:                {c:"--t-self",     label:"Said it about themselves"},
+  operator:            {c:"--t-operator", label:"Operator"},
+  public_post_by_self: {c:"--t-world",    label:"Statement about the world"},
+  self_note:           {c:"--t-selfnote", label:"Axiom's own read"},
+  third_party:         {c:"--t-third",    label:"Someone else's claim", withheld:true}
+};
+const RELS = {
+  like:       {label:"Similar",    dash:null,  w:1.0},
+  said:       {label:"Said",       dash:null,  w:1.1},
+  about:      {label:"About",      dash:[3,3], w:1.3},
+  on:         {label:"Surface",    dash:null,  w:0.6},
+  supersedes: {label:"Supersedes", dash:[6,3], w:1.8}
+};
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const el  = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+let G = null, N = [], E = [], byId = new Map(), adj = new Map();
+let view = {x:0, y:0, k:1};
+let hover = null, selected = null, dragNode = null, panning = false;
+let show = {people:true, sim:true, withheld:true, tiers:new Set(Object.keys(TIERS)),
+            surfaces:new Set(), query:"", tMax:Infinity};
+let matched = null;
+let playing = false, playT = 0;
+/* Cooling. Without it the layout never settles: springs and repulsion trade
+   energy forever and the whole graph shimmers. alpha decays to nothing, the
+   physics stops, and anything that changes the layout re-heats it. */
+let alpha = 1, settled = false, autoFit = true;
+function reheat(a = 0.65){ alpha = Math.max(alpha, a); settled = false; }
+
+const canvas = el("c"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+/* ------------------------------------------------------------ load */
+function load(graph){
+  G = graph;
+  N = graph.nodes.map(n => ({...n}));
+  E = graph.edges.map(e => ({...e}));
+  byId = new Map(N.map(n => [n.id, n]));
+  adj = new Map(N.map(n => [n.id, []]));
+  E = E.filter(e => byId.has(e.s) && byId.has(e.t));
+  for (const e of E){
+    adj.get(e.s).push({o:e.t, rel:e.rel, w:e.w});
+    adj.get(e.t).push({o:e.s, rel:e.rel, w:e.w});
+  }
+  // Degree drives size, so the shape of the graph reads before any label does.
+  N.forEach((n, i) => { n.idx = i; n.deg = adj.get(n.id).length; });
+  const seed = 1337;
+  let r = seed;
+  const rnd = () => (r = (r * 16807) % 2147483647) / 2147483647;
+  const R = Math.min(W, H) * 0.34 || 260;
+  for (const n of N){
+    const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * R;
+    n.x = Math.cos(a) * d; n.y = Math.sin(a) * d; n.vx = 0; n.vy = 0;
+    n.r = n.type === "surface" ? 13
+        : n.type === "person"  ? 5 + Math.min(Math.sqrt(n.notes || 1) * 2.4, 11)
+        : 3 + Math.min(Math.sqrt(n.deg) * 1.1, 5);
+    n.born = n.created_at || graph.stats.first_note || 0;
+  }
+  // Surfaces are anchors, not participants. Two heavy hubs pulling 131 notes
+  // while repulsion pushes back is the oscillation; pinning them apart turns
+  // the same data into a stable lobe per surface.
+  const surf = N.filter(n => n.type === "surface");
+  surf.forEach((n, i) => {
+    n.fixed = true;
+    const spread = Math.min(W, H) * 0.3 || 240;
+    n.x = surf.length === 1 ? 0 : (i / (surf.length - 1) - 0.5) * 2 * spread;
+    n.y = 0;
+  });
+  alpha = 1; settled = false;
+  show.surfaces = new Set(N.filter(n => n.type === "surface").map(n => n.label));
+  el("empty").classList.remove("show");
+  autoFit = true;
+  buildRail(); buildSpark(); fit();
+}
+
+/* ------------------------------------------------------------ rail */
+function buildRail(){
+  const s = G.stats;
+  const d = new Date((G.generated_at || 0) * 1000);
+  el("stamp").textContent = "exported " + (G.generated_at
+    ? d.toISOString().slice(0,16).replace("T"," ") + "Z" : "unknown");
+
+  el("counts").innerHTML = [
+    ["notes", s.notes], ["people", s.people],
+    ["links", G.edges.length], ["observations", s.observations ?? "—"],
+    ["recalled", s.recalled], ["withheld", s.withheld, "warn"]
+  ].map(([k,v,cl]) =>
+    `<div class="count ${cl||""}"><b>${v}</b><span>${k}</span></div>`).join("");
+
+  const tc = {};
+  for (const n of N) if (n.type === "note") tc[n.tier] = (tc[n.tier]||0)+1;
+  el("tiers").innerHTML = Object.entries(TIERS).map(([k,t]) =>
+    `<button class="leg" data-tier="${k}" aria-pressed="true">
+       <span class="dot${t.withheld?" ring":""}" style="background:${t.withheld?"transparent":`var(${t.c})`}"></span>
+       <span class="lbl">${t.label}</span><span class="n">${tc[k]||0}</span></button>`).join("");
+
+  const sc = {};
+  for (const n of N) if (n.type === "note") sc[n.surface] = (sc[n.surface]||0)+1;
+  el("surfaces").innerHTML = Object.keys(sc).sort().map(k =>
+    `<button class="leg" data-surface="${esc(k)}" aria-pressed="true">
+       <span class="dot" style="background:var(--surface-node)"></span>
+       <span class="lbl mono">${esc(k)}</span><span class="n">${sc[k]}</span></button>`).join("");
+
+  const rc = {};
+  for (const e of E) rc[e.rel] = (rc[e.rel]||0)+1;
+  el("rels").innerHTML = Object.entries(RELS).filter(([k]) => rc[k]).map(([k,v]) =>
+    `<div class="leg" style="cursor:default">
+       <svg width="18" height="9" aria-hidden="true"><line x1="1" y1="4.5" x2="17" y2="4.5"
+         stroke="var(--text-faint)" stroke-width="${v.w}"
+         ${v.dash?`stroke-dasharray="${v.dash.join(" ")}"`:""}/></svg>
+       <span class="lbl">${v.label}</span><span class="n">${rc[k]}</span></div>`).join("");
+
+  el("tiers").querySelectorAll("[data-tier]").forEach(b =>
+    b.onclick = () => {
+      const k = b.dataset.tier, on = b.getAttribute("aria-pressed") === "true";
+      b.setAttribute("aria-pressed", String(!on));
+      on ? show.tiers.delete(k) : show.tiers.add(k);
+      reheat(0.4);
+    });
+  el("surfaces").querySelectorAll("[data-surface]").forEach(b =>
+    b.onclick = () => {
+      const k = b.dataset.surface, on = b.getAttribute("aria-pressed") === "true";
+      b.setAttribute("aria-pressed", String(!on));
+      on ? show.surfaces.delete(k) : show.surfaces.add(k);
+      reheat(0.4);
+    });
+}
+
+/* --------------------------------------------- growth sparkline */
+function buildSpark(){
+  const svg = el("spark");
+  const notes = N.filter(n => n.type === "note" && n.born).sort((a,b) => a.born - b.born);
+  if (notes.length < 2){ svg.innerHTML = ""; return; }
+  const t0 = notes[0].born, t1 = notes[notes.length-1].born, span = (t1-t0)||1;
+  const w = 100, h = 26, BINS = 72;
+  const bins = new Array(BINS).fill(0);
+  for (const n of notes) bins[Math.min(BINS-1, Math.floor((n.born-t0)/span*BINS))]++;
+  let cum = 0; const pts = bins.map((b,i) => { cum += b;
+    return [i/(BINS-1)*w, h - 1.5 - (cum/notes.length)*(h-4)]; });
+  const line = pts.map(p => p.map(v => v.toFixed(2)).join(",")).join(" ");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.innerHTML =
+    `<polyline points="${line} ${w},${h} 0,${h}" fill="var(--sel)" opacity=".13"/>
+     <polyline points="${line}" fill="none" stroke="var(--sel)" stroke-width="1"
+       vector-effect="non-scaling-stroke"/>`;
+  el("time").dataset.t0 = t0; el("time").dataset.t1 = t1;
+}
+
+/* ------------------------------------------------------- filtering */
+function visible(n){
+  if (n.type === "person"  && !show.people) return false;
+  if (n.type === "surface") return show.surfaces.has(n.label);
+  if (n.type === "note"){
+    if (!show.tiers.has(n.tier)) return false;
+    if (!show.withheld && !n.recalled) return false;
+    if (!show.surfaces.has(n.surface)) return false;
+    if (n.born > show.tMax) return false;
+  }
+  return true;
+}
+function edgeVisible(e){
+  if (e.rel === "like" && !show.sim) return false;
+  return visible(byId.get(e.s)) && visible(byId.get(e.t));
+}
+function runQuery(){
+  const q = show.query.trim().toLowerCase();
+  if (!q){ matched = null; return; }
+  matched = new Set();
+  for (const n of N){
+    const hay = n.type === "note"
+      ? `${n.text} ${n.author} ${n.subject||""} ${n.wave||""} ${n.tier}`
+      : n.label;
+    if (hay.toLowerCase().includes(q)) matched.add(n.id);
+  }
+}
+
+/* ------------------------------------------------------------ force */
+const ALPHA_DECAY = 0.0235, ALPHA_MIN = 0.004, VEL_DECAY = 0.62, MAX_V = 14;
+
+function tick(){
+  const vis = N.filter(visible);
+  const CH = -780, SPRING = 0.022, CENTER = 0.0022;
+
+  for (let i = 0; i < vis.length; i++){
+    const a = vis[i];
+    for (let j = i+1; j < vis.length; j++){
+      const b = vis[j];
+      let dx = b.x-a.x, dy = b.y-a.y, d2 = dx*dx+dy*dy;
+      // Deterministic nudge when two nodes coincide. Random jitter here feeds
+      // the system energy every frame and it never comes to rest.
+      if (d2 < 1){ dx = (a.idx % 2 ? 1 : -1) * 0.5; dy = 0.5; d2 = 0.5; }
+      if (d2 > 250000) continue;
+      const d = Math.sqrt(d2), f = CH / d2 * alpha;
+      const fx = dx/d*f, fy = dy/d*f;
+      a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+    }
+  }
+  for (const e of E){
+    if (!edgeVisible(e)) continue;
+    const a = byId.get(e.s), b = byId.get(e.t);
+    const want = e.rel === "on" ? 190 : e.rel === "like" ? 70 : 52;
+    const k = (e.rel === "on" ? 0.1 : e.rel === "like" ? (e.w || 0.7) : 1) * SPRING;
+    const dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
+    const f = (d - want) * k * alpha;
+    const fx = dx/d*f, fy = dy/d*f;
+    a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+  }
+  let moved = 0;
+  for (const n of vis){
+    if (n.fixed){ n.vx = n.vy = 0; continue; }
+    if (n === dragNode){ n.vx = n.vy = 0; continue; }
+    n.vx -= n.x * CENTER * alpha; n.vy -= n.y * CENTER * alpha;
+    n.vx *= VEL_DECAY; n.vy *= VEL_DECAY;
+    const sp = Math.hypot(n.vx, n.vy);
+    if (sp > MAX_V){ n.vx = n.vx/sp*MAX_V; n.vy = n.vy/sp*MAX_V; }
+    n.x += n.vx; n.y += n.vy;
+    moved += sp;
+  }
+  alpha -= alpha * ALPHA_DECAY;
+  // Come to a stop on either condition: the schedule ran out, or the layout
+  // stopped moving. Then leave it alone - a still graph is readable.
+  if (alpha < ALPHA_MIN || (vis.length && moved / vis.length < 0.035)){
+    for (const n of N){ n.vx = 0; n.vy = 0; }
+    alpha = 0; settled = true;
+    if (autoFit){ autoFit = false; fit(); }
+  }
+}
+
+/* ------------------------------------------------------------- draw */
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+  ctx.translate(W/2 + view.x, H/2 + view.y);
+  ctx.scale(view.k, view.k);
+
+  const focus = hover || selected;
+  const near = new Set();
+  if (focus){ near.add(focus.id); for (const a of adj.get(focus.id)) near.add(a.o); }
+
+  for (const e of E){
+    if (!edgeVisible(e)) continue;
+    const a = byId.get(e.s), b = byId.get(e.t), def = RELS[e.rel] || RELS.like;
+    const lit = !focus || (near.has(a.id) && near.has(b.id));
+    ctx.globalAlpha = lit ? (e.rel === "like" ? 0.16 + (e.w||0.6)*0.3
+                             : e.rel === "on" ? 0.1 : 0.34)
+                          : 0.035;
+    ctx.strokeStyle = e.rel === "supersedes" ? css("--t-third") : css("--text-faint");
+    ctx.lineWidth = (def.w || 1) / view.k * (lit && focus ? 1.5 : 1);
+    ctx.setLineDash(def.dash ? def.dash.map(v => v/view.k) : []);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  const order = N.filter(visible).sort((a,b) => a.r - b.r);
+  // Keep roughly a dozen handles on screen at rest; zooming reveals the rest.
+  const counts = order.filter(n => n.type === "person")
+                      .map(n => n.notes || 0).sort((a,b) => b-a);
+  const labelCut = counts.length > 12 ? counts[11] : 0;
+  for (const n of order){
+    const lit = !focus || near.has(n.id);
+    const hit = matched ? matched.has(n.id) : true;
+    ctx.globalAlpha = (lit ? 1 : 0.14) * (hit ? 1 : 0.16);
+
+    let fill = css("--surface-node"), stroke = null, dash = null;
+    if (n.type === "note"){
+      const t = TIERS[n.tier] || TIERS.public_post_by_self;
+      if (t.withheld || !n.recalled){ fill = "transparent"; stroke = css("--t-third"); dash = [2.5,2.5]; }
+      else fill = css(t.c);
+    } else if (n.type === "person"){ fill = css("--person"); }
+
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI*2);
+    if (fill !== "transparent"){ ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke){
+      ctx.strokeStyle = stroke; ctx.lineWidth = 1.4/view.k;
+      ctx.setLineDash(dash.map(v => v/view.k)); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (n === selected){
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 4.5/view.k, 0, Math.PI*2);
+      ctx.strokeStyle = css("--sel"); ctx.lineWidth = 1.6/view.k; ctx.stroke();
+    }
+    const important = n.type === "surface"
+      || (n.type === "person" && (n.notes >= labelCut || view.k > 1.15));
+    const shownLabel = important || n === hover || n === selected;
+    if (n.type !== "note" && shownLabel && lit){
+      ctx.globalAlpha = (n === hover || n === selected) ? 1 : 0.85;
+      ctx.fillStyle = css("--text");
+      ctx.font = `${n.type === "surface" ? 600 : 500} ${(n.type==="surface"?12:11)/view.k}px "IBM Plex Mono", monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.fillText(n.label, n.x, n.y + n.r + 4/view.k);
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function frame(){
+  if (playing){
+    playT += 0.0055;
+    if (playT >= 1){ playT = 1; playing = false; el("btn-play").innerHTML = "&#9654; Replay growth"; }
+    el("time").value = Math.round(playT * 1000);
+    applyTime();
+  }
+  if (!settled || dragNode) tick();
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------------------------------- interaction */
+function toWorld(px, py){
+  const r = canvas.getBoundingClientRect();
+  return {x: (px - r.left - W/2 - view.x)/view.k, y: (py - r.top - H/2 - view.y)/view.k};
+}
+function pick(px, py){
+  const p = toWorld(px, py);
+  let best = null, bd = Infinity;
+  for (const n of N){
+    if (!visible(n)) continue;
+    const d = Math.hypot(n.x-p.x, n.y-p.y);
+    if (d < Math.max(n.r + 6/view.k, 9/view.k) && d < bd){ bd = d; best = n; }
+  }
+  return best;
+}
+const INSET = {top:58, bottom:104, side:26};   // toolbar and scrubber overlay the canvas
+function fit(){
+  const vis = N.filter(visible);
+  if (!vis.length) return;
+  const xs = vis.map(n => n.x), ys = vis.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const w = (maxX-minX) || 1, h = (maxY-minY) || 1;
+  const availW = Math.max(120, W - INSET.side*2);
+  const availH = Math.max(120, H - INSET.top - INSET.bottom);
+  view.k = Math.min(availW/(w+90), availH/(h+90), 2.2);
+  // Centre inside the free area, not the whole canvas.
+  view.x = -((maxX+minX)/2) * view.k + (INSET.side - INSET.side);
+  view.y = -((maxY+minY)/2) * view.k + (INSET.top - INSET.bottom)/2;
+}
+
+canvas.addEventListener("mousedown", e => {
+  const n = pick(e.clientX, e.clientY);
+  if (n){ dragNode = n; select(n); reheat(0.3); } else { panning = true; canvas.classList.add("dragging"); }
+});
+window.addEventListener("mousemove", e => {
+  if (dragNode){
+    const p = toWorld(e.clientX, e.clientY);
+    dragNode.x = p.x; dragNode.y = p.y; dragNode.vx = dragNode.vy = 0;
+  } else if (panning){
+    view.x += e.movementX; view.y += e.movementY;
+  } else {
+    const n = pick(e.clientX, e.clientY);
+    if (n !== hover){ hover = n; readout(n); canvas.style.cursor = n ? "pointer" : "grab"; }
+  }
+});
+window.addEventListener("mouseup", () => {
+  dragNode = null; panning = false; canvas.classList.remove("dragging");
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const f = Math.exp(-e.deltaY * 0.0014);
+  const p = toWorld(e.clientX, e.clientY);
+  view.k = Math.max(0.15, Math.min(6, view.k * f));
+  const q = toWorld(e.clientX, e.clientY);
+  view.x += (q.x - p.x) * view.k; view.y += (q.y - p.y) * view.k;
+}, {passive:false});
+
+function readout(n){
+  el("readout").textContent = n
+    ? (n.type === "note" ? `${n.tier}  ${n.recalled ? "recalled" : "withheld"}`
+       : n.type === "person" ? `@${n.label}  ${n.authored} said / ${n.about} about`
+       : `${n.label}  ${n.notes} notes`)
+    : `${N.filter(visible).length} of ${N.length} shown`;
+}
+
+/* ------------------------------------------------------- inspector */
+function select(n){
+  selected = n;
+  el("insp-kind").textContent = n.type === "note" ? "Note"
+    : n.type === "person" ? "Person" : "Surface";
+  el("insp-id").textContent = n.type === "note" ? n.id.replace("n:", "note ") : n.id;
+  el("insp-body").innerHTML = n.type === "note" ? noteHTML(n)
+    : n.type === "person" ? personHTML(n) : surfaceHTML(n);
+  el("inspector").classList.add("open");
+  el("insp-body").querySelectorAll("[data-go]").forEach(b =>
+    b.onclick = () => { const t = byId.get(b.dataset.go); if (t) select(t); });
+}
+function neighbourList(n, rels){
+  const items = adj.get(n.id)
+    .filter(a => !rels || rels.includes(a.rel))
+    .map(a => ({...a, node: byId.get(a.o)}))
+    .filter(a => a.node)
+    .sort((a,b) => (b.w||0) - (a.w||0))
+    .slice(0, 14);
+  if (!items.length) return `<p style="color:var(--text-faint);font-size:12.5px;margin:9px 0 0">Nothing linked yet.</p>`;
+  return `<ul class="neighbours">` + items.map(a => `
+    <li><button data-go="${a.node.id}">
+      <span class="rel">${(RELS[a.rel]||{}).label || a.rel}</span>
+      <span>${esc(a.node.type === "note" ? a.node.label : "@" + a.node.label)}</span>
+      ${a.w ? `<span class="w">${a.w}</span>` : ""}
+    </button></li>`).join("") + `</ul>`;
+}
+function noteHTML(n){
+  const t = TIERS[n.tier] || {};
+  const why = n.recalled
+    ? `Recalled. ${t.label} &mdash; an assertion this store will return.`
+    : (n.tier === "third_party"
+        ? `Withheld. This is someone else's claim about @${esc(n.subject||"someone")}, so it is kept for the record and never returned as fact.`
+        : `Withheld. Status is <span class="mono">${esc(n.status)}</span>.`);
+  return `
+    <p class="claim">${esc(n.text)}</p>
+    <span class="badge ${n.recalled ? "ok" : "no"}">${n.recalled ? "Recalled" : "Withheld"}</span>
+    <p style="font-size:12.5px;color:var(--text-dim);margin:12px 0 0">${why}</p>
+    <dl class="kv">
+      <dt>Said by</dt><dd>@${esc(n.author || "unknown")}</dd>
+      ${n.subject ? `<dt>About</dt><dd>@${esc(n.subject)}</dd>` : ""}
+      <dt>Entitled</dt><dd>${esc(n.tier)}</dd>
+      <dt>Surface</dt><dd>${esc(n.surface)}</dd>
+      ${n.wave ? `<dt>Where</dt><dd>${esc(n.wave)}</dd>` : ""}
+      <dt>Learned</dt><dd>${n.created_at ? new Date(n.created_at*1000).toISOString().slice(0,16).replace("T"," ") : "—"}</dd>
+      <dt>Drop</dt><dd style="font-size:11px">${esc(n.drop || "—")}</dd>
+    </dl>
+    <div class="eyebrow">Closest claims</div>
+    ${neighbourList(n, ["like","supersedes"])}
+    <div class="eyebrow">People</div>
+    ${neighbourList(n, ["said","about"])}`;
+}
+function personHTML(n){
+  return `
+    <p class="claim mono">@${esc(n.label)}</p>
+    <dl class="kv">
+      <dt>Said</dt><dd>${n.authored}</dd>
+      <dt>About them</dt><dd>${n.about}</dd>
+      <dt>Seen on</dt><dd>${n.surfaces.map(esc).join(", ")}</dd>
+    </dl>
+    <div class="eyebrow">What this links to</div>
+    ${neighbourList(n)}`;
+}
+function surfaceHTML(n){
+  return `
+    <p class="claim mono">${esc(n.label)}</p>
+    <dl class="kv"><dt>Notes</dt><dd>${n.notes}</dd></dl>
+    <p style="font-size:12.5px;color:var(--text-dim);margin:12px 0 0">
+      One store holds every surface, so a person met in two places is one
+      history.</p>`;
+}
+el("insp-close").onclick = () => {
+  el("inspector").classList.remove("open"); selected = null; readout(null);
+};
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape"){ el("insp-close").click(); }
+  if (e.key === "f" && !/input|textarea/i.test(e.target.tagName)) fit();
+});
+
+/* ---------------------------------------------------------- controls */
+el("btn-fit").onclick = fit;
+for (const [id, key] of [["btn-people","people"],["btn-sim","sim"],["btn-withheld","withheld"]]){
+  el(id).onclick = () => {
+    show[key] = !show[key];
+    el(id).setAttribute("aria-pressed", String(show[key]));
+    reheat(0.45);
+    readout(null);
+  };
+}
+el("q").addEventListener("input", e => { show.query = e.target.value; runQuery(); });
+function applyTime(){
+  const r = el("time"), t0 = +r.dataset.t0 || 0, t1 = +r.dataset.t1 || 0;
+  const frac = +r.value / 1000;
+  show.tMax = frac >= 1 ? Infinity : t0 + (t1 - t0) * frac;
+  el("when").textContent = frac >= 1 ? "all"
+    : new Date(show.tMax * 1000).toISOString().slice(0,16).replace("T"," ") + "Z";
+  reheat(0.22);
+  readout(null);
+}
+el("time").addEventListener("input", () => { playing = false;
+  el("btn-play").innerHTML = "&#9654; Replay growth"; applyTime(); });
+el("btn-play").onclick = () => {
+  playing = !playing;
+  if (playing){ playT = 0; el("btn-play").innerHTML = "&#10073;&#10073; Pause"; }
+  else el("btn-play").innerHTML = "&#9654; Replay growth";
+};
+el("file").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => { try { load(JSON.parse(fr.result)); } catch (err) {
+    el("empty").querySelector("p").textContent = "That file is not a graph export: " + err.message;
+  } };
+  fr.readAsText(f);
+});
+
+/* -------------------------------------------------------------- boot */
+window.addEventListener("resize", () => { resize(); reheat(0.3); });
+resize();
+if (window.__GRAPH__) load(window.__GRAPH__);
+else {
+  fetch("graph.json").then(r => r.ok ? r.json() : Promise.reject())
+    .then(load).catch(() => el("empty").classList.add("show"));
+}
+readout(null);
+requestAnimationFrame(frame);
+</script>
