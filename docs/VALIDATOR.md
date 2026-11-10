@@ -24,6 +24,60 @@ Two things worth knowing up front, both stated by the project:
 
 Apache-2.0. The binary is `validator`; run `validator --help`.
 
+## Keeping it current, unattended
+
+From **rc.14** the validator installs its own updates - but only on Windows,
+in the Mac app, and from the Linux `.deb`. A **tarball install under
+`/usr/local`, run as a system service, is none of those** and will sit on an
+old release indefinitely. If that is your shape, schedule this:
+
+```bash
+./scripts/auto-update-validator.sh --check   # report only
+./scripts/auto-update-validator.sh           # update if there is one
+```
+
+```cron
+30 8 * * *  cd /opt/6529Agentic && SUDO_ASKPASS=/path/to/askpass ./scripts/auto-update-validator.sh
+```
+
+What it refuses to do matters more than what it does:
+
+- **It will not install an unverified build.** It calls
+  `install-validator.sh`, which checks SHA-256 against `SHA256SUMS` *and* the
+  signed feed, and stops on a mismatch.
+- **It will not update while today's vote is due.** Signing comes first. If
+  the ledger cannot be read at all it defers rather than proceeding blind -
+  an unknown signing state is a reason to wait, not a reason to go.
+- **It will not leave you on a broken release.** If the new binary will not
+  report its version, the service will not come back, or its status is
+  unreadable, the previous build is restored and the exit code says a human
+  is needed. Builds install side by side, so rollback is a symlink change.
+
+Exit codes: `0` current or updated and verified, `4` deferred (try later),
+`5` needs a human.
+
+### Root, with no terminal
+
+Installing needs root, and cron has no terminal for `sudo` to prompt on.
+Either give the cron user a `NOPASSWD` rule for the install, or point
+`SUDO_ASKPASS` at a helper that prints the password:
+
+```sh
+#!/bin/sh
+# reads it from a secret store at prompt time; never stored in the job,
+# the environment, or a log
+exec security find-generic-password -a "$USER" -s validator.SUDO -w
+```
+
+`chmod 700` it. Without one, the job says so and exits rather than failing
+silently every morning.
+
+### Choose the hour deliberately
+
+Pick a time clear of both ends of the day: the validator signs shortly after
+00:00 UTC and the day is final at 19:30 UTC. A restart in between is safe; one
+just before finalisation is not worth the risk. 08:30 local worked for us.
+
 ## The signed release feed — the automation surface
 
 `https://6529.io/validator/releases.json` (+ `releases.json.sig`)

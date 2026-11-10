@@ -13,6 +13,7 @@ on by default.
 ## Monitor
 
 ```bash
+./scripts/auto-update-validator.sh  # stay on the current release, safely
 ./bin/6529 validator watch     # exit 0 healthy, 5 needs attention
 ./bin/6529 validator status    # local health
 ./bin/6529 validator release   # installed vs the signed feed
@@ -114,3 +115,22 @@ version's folder until the new one has signed a day, so you can roll back.
 signing with one key is a double vote, and the excluded grant's keys *never
 count for that account again*. On a new machine, install fresh and make a new
 key.
+
+## Staying current without being asked
+
+From rc.14 the validator installs its own updates, but only on Windows, in
+the Mac app, and from the Linux `.deb`. A tarball install run as a system
+service is none of those and will sit on an old release forever, which is how
+a validator quietly drops below `min_supported` and stops counting.
+
+`scripts/auto-update-validator.sh` is the daily job for that shape. It
+verifies the SHA-256 against the signed feed, **defers while the day's vote is
+still due** - and defers rather than guessing if it cannot read the ledger at
+all - and restores the previous build if the new one will not start or its
+status is unreadable. Builds install side by side, so a rollback is a symlink
+change.
+
+Exit `0` current or updated, `4` deferred, `5` a human is needed. Alert on 5.
+
+Do not report an update as done without reading back the version and the
+service state. The point of the job is that nobody is watching.

@@ -183,10 +183,17 @@ It is a standalone CLI with a built-in service installer — headless servers an
 Raspberry Pis included.
 
 ```bash
-./scripts/install-validator.sh --check   # what release, what machine, no changes
-./scripts/install-validator.sh           # download, VERIFY sha256, install
-./bin/6529 validator watch               # health + release currency
+./scripts/install-validator.sh --check     # what release, what machine, no changes
+./scripts/install-validator.sh             # download, VERIFY sha256, install
+./scripts/auto-update-validator.sh         # stay current, safely, on a schedule
+./bin/6529 validator watch                 # health + release currency
 ```
+
+From rc.14 the validator updates itself on Windows, in the Mac app, and from
+the Linux `.deb`. A tarball install run as a system service is none of those,
+so `auto-update-validator.sh` closes that gap: it verifies the SHA-256,
+refuses to act while the day's vote is still due, and restores the previous
+build if the new one will not come up.
 
 The installer refuses to install a build whose SHA-256 does not match the
 signed release feed, and stops before touching system services so you can run
