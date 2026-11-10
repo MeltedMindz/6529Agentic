@@ -127,7 +127,10 @@ END;
 """
 
 # Who may assert a claim about whom.
-TRUSTED_ASSERTERS = ("self", "operator", "public_post_by_self")
+# `self_note` is the agent's own read of someone, which is its own memory and
+# clearly attributable to itself - unlike `third_party`, a stranger's claim
+# about a person, which is kept for the record and never recalled as fact.
+TRUSTED_ASSERTERS = ("self", "operator", "public_post_by_self", "self_note")
 
 # Bumped when the lexical index needs rebuilding from the notes table. Tracked
 # in PRAGMA user_version so the rebuild happens once, not on every open.
@@ -234,6 +237,11 @@ JSON array:"""
 _HANDLE = re.compile(r"@\[?([A-Za-z0-9_]{2,30})\]?")
 
 
+def _hash12(s: str) -> str:
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
+
+
 def _row_source(row) -> str:
     """An older observation row has no source column; it predates Twitter."""
     try:
@@ -253,18 +261,36 @@ _ADDRESSING = re.compile(r"^\s*(?:@\[?[A-Za-z0-9_]{2,30}\]?[\s,:]*)+")
 ADDRESSING_SURFACES = ("twitter",)
 
 
-def _subject_of(text: str, source: str = "6529") -> Optional[str]:
+def _subject_of(text: str, addressing: bool = False) -> Optional[str]:
     """The person a claim is about, if it names one.
 
     Only an explicit @handle counts, and never one that is merely addressing.
     Guessing a subject from prose would create exactly the false
     attributions this gate exists to prevent.
+
+    `addressing` says whether a leading @handle in this text is a reply
+    prefix. See ADDRESSING_SURFACES: it is true for a message someone sent on
+    a platform that opens replies that way, and false for the agent's own
+    memoranda, which follow no such convention.
     """
     body = text or ""
-    if source in ADDRESSING_SURFACES:
+    if addressing:
         body = _ADDRESSING.sub("", body, count=1)
     m = _HANDLE.search(body)
     return m.group(1) if m else None
+
+
+def addresses_by_prefix(source: str, author: Optional[str],
+                        self_handles: Iterable[str] = ()) -> bool:
+    """Does a leading @handle in this text mean "to", rather than "about"?
+
+    Only for a message written by someone else on a platform whose replies
+    open that way. The agent's own notes are not replies.
+    """
+    if source not in ADDRESSING_SURFACES:
+        return False
+    a = (author or "").lower()
+    return not (a and a in {h.lower() for h in self_handles})
 
 
 def _date_of(created_at: Optional[int]) -> str:
@@ -350,6 +376,12 @@ class Memory:
     operator_handles: tuple = tuple(
         h for h in os.environ.get("AGENT6529_OPERATOR_HANDLES", "").split(",") if h
     )
+    # This agent's own handles. Its own notes about other people are its own
+    # memory, not a stranger's claim, so they stay recallable - attributed to
+    # itself, never laundered into something the other person said.
+    self_handles: tuple = tuple(
+        h for h in os.environ.get("AGENT6529_SELF_HANDLES", "").split(",") if h
+    )
 
     def __init__(self, path: Optional[str] = None):
         # Resolved at call time, not bound as a default: the state directory
@@ -423,28 +455,43 @@ class Memory:
         except sqlite3.IntegrityError:
             return False
 
-    def unlearned(self, limit: int = 25) -> List[sqlite3.Row]:
-        """Observations not yet distilled. Suspicious ones are never queued."""
+    def unlearned(self, limit: int = 25,
+                  source: Optional[str] = None) -> List[sqlite3.Row]:
+        """Observations not yet distilled. Suspicious ones are never queued.
+
+        Oldest first, so nothing starves - but scopable by surface, because a
+        caller working one surface should not have to drain another's backlog
+        before reaching its own.
+        """
         if limit < 0:
             raise ValueError("learning limit must be non-negative")
-        return self.db.execute(
-            "SELECT * FROM observations WHERE learned_at IS NULL "
-            "AND suspicious=0 ORDER BY seen_at LIMIT ?", (limit,)
-        ).fetchall()
+        sql = ("SELECT * FROM observations WHERE learned_at IS NULL "
+               "AND suspicious=0")
+        params: List[Any] = []
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " ORDER BY seen_at LIMIT ?"
+        params.append(limit)
+        return self.db.execute(sql, params).fetchall()
 
     # ---------------- learn ----------------
     @staticmethod
     def assertion_tier(author: Optional[str], subject: Optional[str],
-                       operator_handles: Iterable[str] = ()) -> str:
+                       operator_handles: Iterable[str] = (),
+                       self_handles: Iterable[str] = ()) -> str:
         """Who is making this claim, about whom.
 
         A post is self-assertion when its author is also its subject, operator
-        when the author is the operator, and third_party otherwise. Third-party
-        claims are stored but never recalled as fact.
+        when the author is the operator, self_note when the agent is recording
+        its own read of someone, and third_party otherwise. Third-party claims
+        are stored but never recalled as fact.
         """
         a = (author or "").lower()
         if a and a in {h.lower() for h in operator_handles}:
             return "operator"
+        if a and a in {h.lower() for h in self_handles}:
+            return "self_note" if subject else "public_post_by_self"
         if subject and a and a == subject.lower():
             return "self"
         if not subject:
@@ -463,9 +510,13 @@ class Memory:
             except MemoryError_:
                 vec = None
             try:
-                subject = _subject_of(text, _row_source(row))
+                src = _row_source(row)
+                subject = _subject_of(
+                    text, addresses_by_prefix(src, row["author"],
+                                              self.self_handles))
                 tier = self.assertion_tier(row["author"], subject,
-                                           self.operator_handles)
+                                           self.operator_handles,
+                                           self.self_handles)
                 self.db.execute(
                     "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,"
                     "kind,embedding,created_at,asserted_by,subject,status,"
@@ -473,7 +524,7 @@ class Memory:
                     (text, row["drop_id"], row["wave_id"], row["wave_name"],
                      row["author"], "claim",
                      _pack(vec) if vec else None, int(time.time()),
-                     tier, subject, _row_source(row)),
+                     tier, subject, src),
                 )
                 kept += 1
             except sqlite3.IntegrityError:
@@ -484,9 +535,47 @@ class Memory:
         )
         return kept
 
+    def remember(self, text: str, author: Optional[str] = None,
+                 subject: Optional[str] = None, source: str = "6529",
+                 drop_id: Optional[str] = None,
+                 wave_id: Optional[str] = None,
+                 wave_name: Optional[str] = None,
+                 created_at: Optional[int] = None,
+                 kind: str = "note") -> Optional[int]:
+        """Store a note that is already distilled, with no model in the loop.
+
+        An agent's own curated note must not be round-tripped through a claim
+        extractor: measured on Axiom's relationship log, extraction dropped
+        the handle the note was about, substituted a subject from its own
+        training domain, and split one sentence into four near-duplicates.
+        Text written by the agent is kept verbatim, and the subject is given
+        rather than guessed.
+        """
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            vec = embed(contextualize(text, author, wave_name, created_at))
+        except MemoryError_:
+            vec = None
+        tier = self.assertion_tier(author, subject, self.operator_handles,
+                                   self.self_handles)
+        try:
+            cur = self.db.execute(
+                "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,kind,"
+                "embedding,created_at,asserted_by,subject,status,source) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
+                (text, drop_id or f"note-{_hash12(text)}", wave_id, wave_name,
+                 author, kind, _pack(vec) if vec else None,
+                 created_at or int(time.time()), tier, subject, source))
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            return None        # already held
+
     def learn_batch(self, limit: int = 25,
-                    model: str = EXTRACT_MODEL) -> Dict[str, Any]:
-        rows = self.unlearned(limit)
+                    model: str = EXTRACT_MODEL,
+                    source: Optional[str] = None) -> Dict[str, Any]:
+        rows = self.unlearned(limit, source=source)
         notes = 0
         failed: List[Dict[str, str]] = []
         for r in rows:
@@ -711,10 +800,14 @@ class Memory:
     def about(self, author: str, k: int = 10,
               source: Optional[str] = None) -> List[Recalled]:
         """Everything learned from one person, newest first."""
-        sql = ("SELECT * FROM notes WHERE LOWER(author)=LOWER(?) "
+        # What they said, and what is trustworthily recorded about them. A
+        # person's own history is both; restricting to author missed every
+        # note the agent wrote about them.
+        sql = ("SELECT * FROM notes WHERE "
+               "(LOWER(author)=LOWER(?) OR LOWER(subject)=LOWER(?)) "
                "AND status='active' "
                f"AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))})")
-        params: List[Any] = [author, *TRUSTED_ASSERTERS]
+        params: List[Any] = [author, author, *TRUSTED_ASSERTERS]
         if source:
             sql += " AND source = ?"
             params.append(source)

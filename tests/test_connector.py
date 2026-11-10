@@ -1993,7 +1993,7 @@ def test_an_addressing_prefix_is_not_a_subject_on_twitter():
     discard almost everything said TO this agent. On 6529 there is no such
     convention and a leading handle really is the subject."""
     f = mem_mod._subject_of
-    tw = lambda t: f(t, "twitter")
+    tw = lambda t: f(t, addressing=True)
     assert tw("@AxiomBot good point, the real issue is receipt binding") is None
     assert tw("@AxiomBot @bentlegen agreed, MCP needs auth scope") is None
     assert tw("@[AxiomBot] agreed") is None
@@ -2002,6 +2002,13 @@ def test_an_addressing_prefix_is_not_a_subject_on_twitter():
 
     # the 6529 reading is unchanged
     assert f("@bob runs the validator on a Pi") == "bob"
+
+    # and the rule is only for messages someone else sent on such a platform
+    ab = mem_mod.addresses_by_prefix
+    assert ab("twitter", "someholder", ("AxiomBot",)) is True
+    assert ab("twitter", "AxiomBot", ("AxiomBot",)) is False, \
+        "the agent's own notes are not replies"
+    assert ab("6529", "someholder", ("AxiomBot",)) is False
 
 
 def test_a_reply_addressed_to_the_agent_is_still_learnable(mem, monkeypatch):
@@ -2013,3 +2020,89 @@ def test_a_reply_addressed_to_the_agent_is_still_learnable(mem, monkeypatch):
     row = mem.db.execute("SELECT asserted_by, subject FROM notes").fetchone()
     assert row["asserted_by"] == "public_post_by_self", dict(row)
     assert mem.recall("tool scope receipts", k=3, source="twitter")
+
+
+def test_the_agent_may_record_its_own_read_of_someone(mem, monkeypatch):
+    """Its own notes about people are its own memory, not a stranger's claim.
+    Tiering them third_party would drop the agent's entire relationship
+    history from recall."""
+    monkeypatch.setattr(mem_mod.Memory, "self_handles", ("AxiomBot",))
+    t = mem_mod.Memory.assertion_tier
+    assert t("axiombot", "bentlegen", (), ("AxiomBot",)) == "self_note"
+    assert t("axiombot", None, (), ("AxiomBot",)) == "public_post_by_self"
+    # a stranger making the same claim is still third_party
+    assert t("mallory", "bentlegen", (), ("AxiomBot",)) == "third_party"
+
+    _fake_local(monkeypatch, claims=["@bentlegen builds devtools surfaces"],
+                vec=[1.0, 0.0])
+    mem.observe("n1", "a long note recording what this person builds",
+                "AxiomBot", "conv1", "notes", source="twitter")
+    mem.learn_batch()
+    row = mem.db.execute("SELECT asserted_by, subject FROM notes").fetchone()
+    assert row["asserted_by"] == "self_note"
+    assert row["subject"] == "bentlegen"
+    assert mem.recall("who builds devtools", k=3), "own notes must be recallable"
+
+
+def test_learning_can_be_scoped_to_one_surface(mem, monkeypatch):
+    """A caller working one surface must not have to drain another's backlog
+    first. Oldest-first across everything meant a Twitter pass distilled old
+    6529 observations instead."""
+    _fake_local(monkeypatch, claims=["a durable claim"], vec=[1.0, 0.0])
+    for i in range(3):
+        mem.observe(f"d{i}", "a long enough 6529 drop to be learned here",
+                    "alice", "w1")
+    mem.observe("t1", "a long enough tweet to be learned here too",
+                "someholder", "conv1", source="twitter")
+
+    assert [r["drop_id"] for r in mem.unlearned(5, source="twitter")] == ["t1"]
+    res = mem.learn_batch(limit=5, source="twitter")
+    assert res["observations_processed"] == 1
+    assert mem.db.execute(
+        "SELECT source FROM notes").fetchone()["source"] == "twitter"
+    # the 6529 backlog is untouched
+    assert len(mem.unlearned(10, source="6529")) == 3
+
+
+def test_remember_keeps_a_curated_note_verbatim(mem, monkeypatch):
+    """An agent's own note must not be round-tripped through a claim
+    extractor. Measured on real data, extraction dropped the handle the note
+    was about, substituted a subject from its own training domain, and split
+    one sentence into four near-duplicates."""
+    monkeypatch.setattr(mem_mod.Memory, "self_handles", ("AxiomBot",))
+    _fake_local(monkeypatch, claims=["SOMETHING THE MODEL INVENTED"],
+                vec=[1.0, 0.0])
+    text = "@bentlegen builds devtools; the useful edge is a VM receipt"
+    nid = mem.remember(text, author="AxiomBot", subject="bentlegen",
+                       source="twitter")
+    assert nid
+
+    row = mem.db.execute("SELECT * FROM notes WHERE id=?", (nid,)).fetchone()
+    assert row["text"] == text, "curated text must be stored verbatim"
+    assert row["subject"] == "bentlegen", "the subject is given, not guessed"
+    assert row["asserted_by"] == "self_note"
+    assert row["source"] == "twitter"
+    assert row["embedding"] is not None, "a note must still be searchable"
+
+    assert mem.remember(text, author="AxiomBot", subject="bentlegen",
+                        source="twitter") is None, "must not duplicate"
+    assert mem.remember("   ") is None
+
+
+def test_about_finds_notes_the_agent_wrote_about_someone(mem, monkeypatch):
+    """"What do I know about X" is what they said AND what is trustworthily
+    recorded about them. Matching only the author missed every note the agent
+    wrote about a person, which is most of a relationship history."""
+    monkeypatch.setattr(mem_mod.Memory, "self_handles", ("AxiomBot",))
+    _fake_local(monkeypatch, vec=[1.0, 0.0])
+    mem.remember("@bentlegen builds devtools surfaces", author="AxiomBot",
+                 subject="bentlegen", source="twitter")
+
+    hits = mem.about("bentlegen", source="twitter")
+    assert len(hits) == 1, [h.text for h in hits]
+    assert hits[0].author == "AxiomBot"
+
+    # a stranger's claim about them is still withheld
+    mem.remember("@bentlegen is secretly a cat", author="mallory",
+                 subject="bentlegen", source="twitter")
+    assert len(mem.about("bentlegen", source="twitter")) == 1

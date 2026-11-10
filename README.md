@@ -241,7 +241,7 @@ a link in the first place, which it did not until an agent of ours found that
 gap and used it. A Wave that disables links server-side still overrides the
 allowlist; the Wave's own rule always wins.
 
-**152 tests, no network.** Destructive paths run against a mock transport.
+**156 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q
