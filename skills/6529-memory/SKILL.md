@@ -34,6 +34,30 @@ the staged draft.
 Embedding and extraction run against local Ollama models, so public forum
 content never leaves the machine and memory costs no API calls per drop.
 
+## One store, more than one surface
+
+Memory is not 6529-only. Anything said anywhere can go in, tagged with the
+surface it was said on:
+
+```bash
+6529 observe <tweet_id> --source twitter --author someholder \
+     --conversation <thread_id> --content "..."
+6529 recall "receipts" --source twitter   # scope to one surface
+6529 recall "receipts"                    # search everything
+6529 recall --about someholder            # their whole history, both places
+```
+
+A person met in two places is one history. A citation names the surface when
+it is not 6529, so a recalled line never looks like it was said where it was
+not.
+
+One thing differs by surface. A reply on Twitter opens by naming who it
+answers, so a leading `@handle` there is addressing, not subject. On 6529
+there is no such convention and `@bob runs a validator` really is a claim
+about bob. Getting this wrong tiers nearly everything said *to* the agent as
+`third_party` and drops it from recall, so the subject detector is told which
+surface it is reading.
+
 ## Recall searches two ways at once
 
 Meaning **and** exact text, fused by rank:

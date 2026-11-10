@@ -152,6 +152,7 @@ into its own skill should not lose it on the next install:
 | `6529 ingest` | one bounded ingestion pass, for cron |
 | `6529 doctor` | split state, stale session, dead models |
 | `6529 learn --distil` / `recall` / `memory` | conversation memory |
+| `6529 observe <id> --content ... --source <surface>` | feed memory from another platform |
 | `6529 supersede <id>` / `forget` | correct or retract what was learned |
 | `6529 config --allow-link-prefix <url>` | permit one URL prefix while links stay off |
 
@@ -240,7 +241,7 @@ a link in the first place, which it did not until an agent of ours found that
 gap and used it. A Wave that disables links server-side still overrides the
 allowlist; the Wave's own rule always wins.
 
-**137 tests, no network.** Destructive paths run against a mock transport.
+**152 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q

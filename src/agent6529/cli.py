@@ -892,12 +892,12 @@ def cmd_recall(args) -> int:
     mem = mem_mod.Memory()
     try:
         if args.about:
-            hits = mem.about(args.about, k=args.limit)
+            hits = mem.about(args.about, k=args.limit, source=args.source)
         else:
             if not args.query:
                 raise SystemExit("need a query, or --about <handle>")
             hits = mem.recall(args.query, k=args.limit, author=args.author,
-                              wave_id=args.wave)
+                              wave_id=args.wave, source=args.source)
         out({"query": args.query or f"about:{args.about}",
              "hits": len(hits),
              # Results are in fusion order, so "score" (cosine) is not
@@ -916,6 +916,28 @@ def cmd_memory(args) -> int:
     mem = mem_mod.Memory()
     try:
         out(mem.stats())
+    finally:
+        mem.close()
+    return 0
+
+
+def cmd_observe(args) -> int:
+    """Record something said on another surface into the same memory.
+
+    The store is deliberately surface-agnostic: a person met on two
+    platforms should be one history. Learning and recall are unchanged.
+    """
+    from agent6529 import memory as mem_mod
+
+    mem = mem_mod.Memory()
+    try:
+        fresh = mem.observe(args.id, args.content, args.author,
+                            args.conversation, args.context,
+                            created_at=args.created_at,
+                            suspicious=args.suspicious, source=args.source)
+        out({"observed": fresh, "id": args.id, "source": args.source,
+             "note": None if fresh else "already seen; nothing written",
+             "stats": mem.stats()})
     finally:
         mem.close()
     return 0
@@ -1157,6 +1179,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--author", default=None)
     sp.add_argument("--wave", default=None)
     sp.add_argument("--limit", type=int, default=5)
+    sp.add_argument("--source", default=None, metavar="SURFACE",
+                    help="scope to one surface, e.g. 6529 or twitter; "
+                         "omit to search everything")
     sp.set_defaults(fn=cmd_recall)
 
     sp = sub.add_parser("doctor",
@@ -1172,6 +1197,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)
+
+    sp = sub.add_parser("observe",
+                        help="record something said on another surface")
+    sp.add_argument("id", help="stable id of the message, e.g. a tweet id")
+    sp.add_argument("--content", required=True)
+    sp.add_argument("--author", default=None, help="handle, without the @")
+    sp.add_argument("--conversation", default=None,
+                    help="thread or conversation id")
+    sp.add_argument("--context", default=None,
+                    help="human name for the conversation")
+    sp.add_argument("--source", default="twitter", metavar="SURFACE")
+    sp.add_argument("--created-at", type=int, default=None)
+    sp.add_argument("--suspicious", action="store_true",
+                    help="quarantine: kept for the record, never distilled")
+    sp.set_defaults(fn=cmd_observe)
 
     sp = sub.add_parser("forget", help="retract a claim (closed, not deleted)")
     sp.add_argument("--note-id", type=int, default=None)

@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS observations (
   content     TEXT NOT NULL,
   created_at  INTEGER,
   suspicious  INTEGER NOT NULL DEFAULT 0,
+  -- Which surface this was said on. One store, so a person met in two
+  -- places is one history, while recall can still be scoped to one.
+  source      TEXT NOT NULL DEFAULT '6529',
   learned_at  INTEGER,
   seen_at     INTEGER NOT NULL
 );
@@ -80,6 +83,7 @@ CREATE TABLE IF NOT EXISTS notes (
   status      TEXT NOT NULL DEFAULT 'active',
   supersedes  INTEGER,
   valid_to    INTEGER,
+  source      TEXT NOT NULL DEFAULT '6529',
   UNIQUE(drop_id, text)
 );
 CREATE INDEX IF NOT EXISTS idx_notes_author ON notes(author);
@@ -91,6 +95,10 @@ CREATE INDEX IF NOT EXISTS idx_obs_learned  ON observations(learned_at);
 # Added after the table may already exist. Applied one at a time so an older
 # database upgrades in place without losing rows.
 MIGRATIONS = [
+    "ALTER TABLE observations ADD COLUMN source TEXT NOT NULL DEFAULT '6529'",
+    "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT '6529'",
+    "CREATE INDEX IF NOT EXISTS idx_notes_source ON notes(source)",
+    "CREATE INDEX IF NOT EXISTS idx_obs_source ON observations(source)",
     "ALTER TABLE notes ADD COLUMN asserted_by TEXT NOT NULL DEFAULT 'public_post_by_self'",
     "ALTER TABLE notes ADD COLUMN subject TEXT",
     "ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
@@ -226,13 +234,36 @@ JSON array:"""
 _HANDLE = re.compile(r"@\[?([A-Za-z0-9_]{2,30})\]?")
 
 
-def _subject_of(text: str) -> Optional[str]:
+def _row_source(row) -> str:
+    """An older observation row has no source column; it predates Twitter."""
+    try:
+        return row["source"] or "6529"
+    except (IndexError, KeyError):
+        return "6529"
+
+
+_ADDRESSING = re.compile(r"^\s*(?:@\[?[A-Za-z0-9_]{2,30}\]?[\s,:]*)+")
+
+# Surfaces where a reply opens by naming who it answers, so a leading handle
+# is addressing rather than subject. This is a platform convention, not a
+# fact about language: on 6529 "@bob runs the validator" is a claim about bob,
+# while on Twitter "@bob agreed" is just how a reply is addressed. Reading
+# the prefix as a subject there would tier nearly everything said TO this
+# agent as third_party and drop it from recall.
+ADDRESSING_SURFACES = ("twitter",)
+
+
+def _subject_of(text: str, source: str = "6529") -> Optional[str]:
     """The person a claim is about, if it names one.
 
-    Only an explicit @handle counts. Guessing a subject from prose would
-    create exactly the false attributions this gate exists to prevent.
+    Only an explicit @handle counts, and never one that is merely addressing.
+    Guessing a subject from prose would create exactly the false
+    attributions this gate exists to prevent.
     """
-    m = _HANDLE.search(text or "")
+    body = text or ""
+    if source in ADDRESSING_SURFACES:
+        body = _ADDRESSING.sub("", body, count=1)
+    m = _HANDLE.search(body)
     return m.group(1) if m else None
 
 
@@ -299,11 +330,15 @@ class Recalled:
     # simply was not returned. Carrying it lets the caller resolve the
     # reference instead of repeating a fragment.
     source: Optional[str] = None
+    # Which surface it was said on. Named apart from `source` above, which is
+    # the originating post's text.
+    surface: str = "6529"
 
     def cite(self) -> str:
         who = f"@{self.author}" if self.author else "someone"
         where = f" in {self.wave_name}" if self.wave_name else ""
-        return f"{self.text} ({who}{where})"
+        on = "" if self.surface == "6529" else f" on {self.surface}"
+        return f"{self.text} ({who}{where}{on})"
 
     def as_dict(self) -> Dict[str, Any]:
         d = self.__dict__.copy()
@@ -371,16 +406,18 @@ class Memory:
     def observe(self, drop_id: str, content: str, author: Optional[str],
                 wave_id: Optional[str], wave_name: Optional[str] = None,
                 created_at: Optional[int] = None,
-                suspicious: bool = False) -> bool:
+                suspicious: bool = False,
+                source: str = "6529") -> bool:
         """Record what was said. Returns True if this is the first sighting."""
         if not drop_id or not (content or "").strip():
             return False
         try:
             self.db.execute(
                 "INSERT INTO observations(drop_id,wave_id,wave_name,author,"
-                "content,created_at,suspicious,seen_at) VALUES(?,?,?,?,?,?,?,?)",
+                "content,created_at,suspicious,seen_at,source) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
                 (drop_id, wave_id, wave_name, author, content, created_at,
-                 1 if suspicious else 0, int(time.time())),
+                 1 if suspicious else 0, int(time.time()), source),
             )
             return True
         except sqlite3.IntegrityError:
@@ -388,6 +425,8 @@ class Memory:
 
     def unlearned(self, limit: int = 25) -> List[sqlite3.Row]:
         """Observations not yet distilled. Suspicious ones are never queued."""
+        if limit < 0:
+            raise ValueError("learning limit must be non-negative")
         return self.db.execute(
             "SELECT * FROM observations WHERE learned_at IS NULL "
             "AND suspicious=0 ORDER BY seen_at LIMIT ?", (limit,)
@@ -424,17 +463,17 @@ class Memory:
             except MemoryError_:
                 vec = None
             try:
-                subject = _subject_of(text)
+                subject = _subject_of(text, _row_source(row))
                 tier = self.assertion_tier(row["author"], subject,
                                            self.operator_handles)
                 self.db.execute(
                     "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,"
-                    "kind,embedding,created_at,asserted_by,subject,status) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,'active')",
+                    "kind,embedding,created_at,asserted_by,subject,status,"
+                    "source) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
                     (text, row["drop_id"], row["wave_id"], row["wave_name"],
                      row["author"], "claim",
                      _pack(vec) if vec else None, int(time.time()),
-                     tier, subject),
+                     tier, subject, _row_source(row)),
                 )
                 kept += 1
             except sqlite3.IntegrityError:
@@ -473,7 +512,8 @@ class Memory:
 
     def recall(self, query: str, k: int = 5, author: Optional[str] = None,
                wave_id: Optional[str] = None,
-               min_score: Optional[float] = None) -> List[Recalled]:
+               min_score: Optional[float] = None,
+               source: Optional[str] = None) -> List[Recalled]:
         """Find notes relevant to a query, newest-biased on ties.
 
         Falls back to keyword matching when the embedding model is down, so
@@ -489,6 +529,9 @@ class Memory:
         if wave_id:
             sql += " AND wave_id = ?"
             params.append(wave_id)
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
         rows = self.db.execute(sql, params).fetchall()
 
         floor = self.MIN_SCORE if min_score is None else min_score
@@ -499,10 +542,10 @@ class Memory:
             except MemoryError_:
                 # Model down. Lexical is a real index, not a guess, so prefer
                 # it over LIKE scanning; keep LIKE for a no-FTS build.
-                lex = self._lexical(query, k, author, wave_id)
+                lex = self._lexical(query, k, author, wave_id, source)
                 if lex:
                     return [self._mk(r, 0.0) for r in lex]
-                return self._keyword_recall(query, k, author, wave_id)
+                return self._keyword_recall(query, k, author, wave_id, source)
             for r in rows:
                 s = _cosine(qv, _unpack(r["embedding"]))
                 if s >= floor:
@@ -522,14 +565,15 @@ class Memory:
         # this content is full of versions, handles and addresses.
         # A lexical hit deliberately bypasses the cosine floor: an exact
         # identifier match is strong evidence even when the embedding is cold.
-        lex = self._lexical(query, k * 2, author, wave_id)
+        lex = self._lexical(query, k * 2, author, wave_id, source)
         if lex:
             return self._fuse(scored, lex, k, qv)
         if not scored and not rows:
-            return self._keyword_recall(query, k, author, wave_id)
+            return self._keyword_recall(query, k, author, wave_id, source)
         return [self._mk(r, round(s, 3)) for s, r in scored]
 
-    def _lexical(self, query: str, k: int, author, wave_id) -> List[sqlite3.Row]:
+    def _lexical(self, query: str, k: int, author, wave_id,
+                 source=None) -> List[sqlite3.Row]:
         """BM25 over the same notes, same trust and status gate."""
         if not self._fts:
             return []
@@ -547,6 +591,9 @@ class Memory:
         if wave_id:
             sql += " AND n.wave_id = ?"
             params.append(wave_id)
+        if source:
+            sql += " AND n.source = ?"
+            params.append(source)
         sql += " ORDER BY bm25(notes_fts) LIMIT ?"
         params.append(k)
         try:
@@ -588,9 +635,11 @@ class Memory:
             text=r["text"], author=r["author"], wave_name=r["wave_name"],
             drop_id=r["drop_id"], score=score, created_at=r["created_at"],
             source=(src["content"][:400] if src and src["content"] else None),
+            surface=_row_source(r),
         )
 
-    def _keyword_recall(self, query: str, k: int, author, wave_id) -> List[Recalled]:
+    def _keyword_recall(self, query: str, k: int, author, wave_id,
+                        source=None) -> List[Recalled]:
         words = [w.lower() for w in re.findall(r"\w{4,}", query)][:8]
         if not words:
             return []
@@ -603,6 +652,8 @@ class Memory:
             sql += " AND author = ?"; params.append(author)
         if wave_id:
             sql += " AND wave_id = ?"; params.append(wave_id)
+        if source:
+            sql += " AND source = ?"; params.append(source)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(k)
         return [self._mk(r, 0.0)
@@ -657,14 +708,19 @@ class Memory:
             raise MemoryError_("forget needs a note_id or a subject")
         return cur.rowcount
 
-    def about(self, author: str, k: int = 10) -> List[Recalled]:
+    def about(self, author: str, k: int = 10,
+              source: Optional[str] = None) -> List[Recalled]:
         """Everything learned from one person, newest first."""
-        rows = self.db.execute(
-            "SELECT * FROM notes WHERE author=? AND status='active' "
-            f"AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))}) "
-            "ORDER BY created_at DESC LIMIT ?",
-            (author, *TRUSTED_ASSERTERS, k),
-        ).fetchall()
+        sql = ("SELECT * FROM notes WHERE LOWER(author)=LOWER(?) "
+               "AND status='active' "
+               f"AND asserted_by IN ({','.join('?' * len(TRUSTED_ASSERTERS))})")
+        params: List[Any] = [author, *TRUSTED_ASSERTERS]
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(k)
+        rows = self.db.execute(sql, params).fetchall()
         return [self._mk(r, 1.0) for r in rows]
 
     def stats(self) -> Dict[str, Any]:
@@ -680,6 +736,13 @@ class Memory:
             "notes_embedded": q(
                 "SELECT COUNT(*) FROM notes WHERE embedding IS NOT NULL"),
             "authors_known": q("SELECT COUNT(DISTINCT author) FROM notes"),
+            "by_surface": {
+                r["source"]: {"observations": r["obs"], "notes": r["notes"]}
+                for r in self.db.execute(
+                    "SELECT o.source, COUNT(*) obs, "
+                    "(SELECT COUNT(*) FROM notes n WHERE n.source=o.source) notes "
+                    "FROM observations o GROUP BY o.source")
+            },
             "db": self.path,
         }
 

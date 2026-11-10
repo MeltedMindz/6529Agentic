@@ -485,6 +485,15 @@ def test_memory_batch_reports_model_failure_and_keeps_observation_pending(tmpsta
     mem.close()
 
 
+def test_memory_rejects_negative_learning_limit(tmpstate):
+    mem = mem_mod.Memory(os.path.join(tmpstate, "memory.sqlite"))
+    mem.observe("drop-1", "A durable technical observation long enough for learning.",
+                "author", "wave", "Wave")
+    with pytest.raises(ValueError, match="non-negative"):
+        mem.unlearned(limit=-1)
+    mem.close()
+
+
 # ------------------------------------------------------------------ verification
 def test_verification_detects_wrong_reply_parent(store, tmpstate):
     cdid = pub.stage_drop(store, WAVE, "reply body",
@@ -1903,3 +1912,104 @@ def test_an_older_outbox_migrates_and_defaults_to_not_correcting(tmp_path):
         assert bool(row["correcting"]) is False
     finally:
         store.close()
+
+
+# ------------------------------------------------- surfaces
+def test_one_store_two_surfaces(mem, monkeypatch):
+    """A person met in two places should be one history, while recall can
+    still be scoped to the surface being replied on."""
+    _fake_local(monkeypatch, claims=["receipts should bind the tool scope"],
+                vec=[1.0, 0.0])
+    mem.observe("t1", "a long tweet about what a receipt should bind",
+                "someholder", "conv1", "thread", source="twitter")
+    mem.observe("d1", "a long drop about what a receipt should bind",
+                "someholder", "w1", "Wave One")
+    assert mem.learn_batch()["notes_created"] == 2
+
+    both = mem.recall("receipts and tool scope", k=5)
+    assert len(both) == 2, [h.surface for h in both]
+    assert {h.surface for h in both} == {"twitter", "6529"}
+
+    tw = mem.recall("receipts and tool scope", k=5, source="twitter")
+    assert [h.surface for h in tw] == ["twitter"]
+    assert mem.recall("receipts and tool scope", k=5, source="6529")[0].surface == "6529"
+
+    assert len(mem.about("someholder")) == 2
+    assert len(mem.about("someholder", source="twitter")) == 1
+    # handles are case-insensitive on both surfaces
+    assert len(mem.about("SOMEHOLDER", source="twitter")) == 1
+
+    st = mem.stats()["by_surface"]
+    assert st["twitter"]["observations"] == 1 and st["6529"]["observations"] == 1
+
+
+def test_a_citation_names_the_surface_when_it_is_not_6529(mem, monkeypatch):
+    _fake_local(monkeypatch, claims=["a durable claim"], vec=[1.0, 0.0])
+    mem.observe("t1", "a long enough tweet to be considered for learning",
+                "someholder", "conv1", "thread", source="twitter")
+    mem.learn_batch()
+    cite = mem.recall("durable claim", k=1)[0].cite()
+    assert "on twitter" in cite, cite
+
+
+def test_the_surface_defaults_to_6529_for_everything_already_stored(tmp_path):
+    """The live store predates the column. Existing rows must not become
+    twitter rows, and must stay recallable."""
+    path = str(tmp_path / "old.sqlite")
+    con = sqlite3.connect(path)
+    con.executescript("""
+      CREATE TABLE observations (
+        drop_id TEXT PRIMARY KEY, wave_id TEXT, wave_name TEXT, author TEXT,
+        content TEXT NOT NULL, created_at INTEGER, suspicious INTEGER NOT NULL
+          DEFAULT 0, learned_at INTEGER, seen_at INTEGER NOT NULL);
+      CREATE TABLE notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL,
+        drop_id TEXT NOT NULL, wave_id TEXT, wave_name TEXT, author TEXT,
+        kind TEXT NOT NULL DEFAULT 'claim', embedding BLOB,
+        created_at INTEGER NOT NULL, UNIQUE(drop_id, text));
+    """)
+    con.execute("INSERT INTO observations VALUES"
+                "('d1','w1','W','alice','older observation',1000,0,NULL,1000)")
+    con.execute("INSERT INTO notes(text,drop_id,wave_id,author,embedding,"
+                "created_at) VALUES('an older claim','d1','w1','alice',?,1000)",
+                (mem_mod._pack([1.0, 0.0]),))
+    con.commit(); con.close()
+
+    m = mem_mod.Memory(path)
+    try:
+        assert m.db.execute(
+            "SELECT source FROM notes").fetchone()["source"] == "6529"
+        assert m.db.execute(
+            "SELECT source FROM observations").fetchone()["source"] == "6529"
+        assert m.about("alice", source="6529")
+        assert m.about("alice", source="twitter") == []
+    finally:
+        m.close()
+
+
+def test_an_addressing_prefix_is_not_a_subject_on_twitter():
+    """Nearly every tweet reply opens by naming who it answers. Reading that
+    as the subject tiers it third_party and drops it from recall, which would
+    discard almost everything said TO this agent. On 6529 there is no such
+    convention and a leading handle really is the subject."""
+    f = mem_mod._subject_of
+    tw = lambda t: f(t, "twitter")
+    assert tw("@AxiomBot good point, the real issue is receipt binding") is None
+    assert tw("@AxiomBot @bentlegen agreed, MCP needs auth scope") is None
+    assert tw("@[AxiomBot] agreed") is None
+    assert tw("@AxiomBot I think @bentlegen runs that node") == "bentlegen"
+    assert tw("I think @bentlegen runs that node") == "bentlegen"
+
+    # the 6529 reading is unchanged
+    assert f("@bob runs the validator on a Pi") == "bob"
+
+
+def test_a_reply_addressed_to_the_agent_is_still_learnable(mem, monkeypatch):
+    _fake_local(monkeypatch, claims=["receipts should bind the tool scope"],
+                vec=[1.0, 0.0])
+    mem.observe("t1", "@AxiomBot good point, receipts should bind tool scope",
+                "someholder", "conv1", "thread", source="twitter")
+    mem.learn_batch()
+    row = mem.db.execute("SELECT asserted_by, subject FROM notes").fetchone()
+    assert row["asserted_by"] == "public_post_by_self", dict(row)
+    assert mem.recall("tool scope receipts", k=3, source="twitter")
