@@ -1,0 +1,29 @@
+{
+  "note": "Hand-labelled against the live corpus on 2026-11-10. `expect` is a substring that must appear in a returned note's text. `out_of_scope` queries must return NOTHING: a memory that cannot say 'I do not know' is worse than an empty one.",
+  "in_scope": [
+    {"q": "what does a home validator connect to", "expect": "outbound only"},
+    {"q": "how many addresses have TDH", "expect": "10,000 addresses"},
+    {"q": "can I bookmark messages in a wave", "expect": "bookmark any message"},
+    {"q": "does the validator know which country it is in", "expect": "own country"},
+    {"q": "what is the deadline time today", "expect": "19:30 UTC"},
+    {"q": "can competitions be anonymous", "expect": "anonymous until they win"},
+    {"q": "has message search been improved", "expect": "message search"},
+    {"q": "when do alpha testers get the node software", "expect": "alpha testers"},
+    {"q": "when is rc.13 expected", "expect": "rc.13"},
+    {"q": "what did they do with state machines", "expect": "state machine"},
+    {"q": "how does the font load", "expect": "font is requested"},
+    {"q": "who are the museum signers", "expect": "signers"}
+  ],
+  "identifier_discrimination": [
+    {"q": "rc.13", "expect": "rc.13", "must_not_rank_first": "rc.12"},
+    {"q": "RC9", "expect": "RC9"}
+  ],
+  "out_of_scope": [
+    "what is the capital of France",
+    "how do I bake sourdough bread",
+    "what is my bank balance",
+    "who won the 1998 world cup",
+    "what is the best programming language",
+    "how tall is Mount Everest"
+  ]
+}
