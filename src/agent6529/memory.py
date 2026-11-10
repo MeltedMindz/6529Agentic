@@ -28,6 +28,8 @@ Design constraints that are not negotiable:
 from __future__ import annotations
 
 import json
+import array
+import math
 import os
 import re
 import sqlite3
@@ -36,6 +38,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from operator import mul as _mul
 from typing import Any, Dict, Iterable, List, Optional
 
 OLLAMA = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS notes (
   supersedes  INTEGER,
   valid_to    INTEGER,
   source      TEXT NOT NULL DEFAULT '6529',
+  norm        REAL,
   UNIQUE(drop_id, text)
 );
 CREATE INDEX IF NOT EXISTS idx_notes_author ON notes(author);
@@ -97,6 +101,9 @@ CREATE INDEX IF NOT EXISTS idx_obs_learned  ON observations(learned_at);
 MIGRATIONS = [
     "ALTER TABLE observations ADD COLUMN source TEXT NOT NULL DEFAULT '6529'",
     "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT '6529'",
+    # Precomputed vector length. Recomputing it per row per query was 70% of
+    # the scan; it never changes once the embedding is written.
+    "ALTER TABLE notes ADD COLUMN norm REAL",
     "CREATE INDEX IF NOT EXISTS idx_notes_source ON notes(source)",
     "CREATE INDEX IF NOT EXISTS idx_obs_source ON observations(source)",
     "ALTER TABLE notes ADD COLUMN asserted_by TEXT NOT NULL DEFAULT 'public_post_by_self'",
@@ -187,32 +194,97 @@ def contextualize(text: str, author: Optional[str] = None,
     return f"[{' / '.join(bits)}] {text}" if bits else text
 
 
+# Bumped when the text fed to the embedder changes, because old and new
+# vectors are then not comparable. `6529 reembed` rebuilds the corpus.
+EMBED_VERSION = 2
+
+
+def _prepare(text: str) -> str:
+    """Lowercase before embedding. This is not cosmetic.
+
+    The GGUF build of nomic-embed-text here uses the UNCASED BERT vocabulary
+    but does not lowercase its input, so every token carrying a capital misses
+    the vocab and becomes [UNK]. Measured on this machine: "Axiom", "Melted",
+    "Soulforge", "Bankr" and a full 0x address all return the BYTE-IDENTICAL
+    vector, and "Agent Tree is a paid Pro item" vs "Trace Waterfall is a paid
+    Pro item" score cosine 1.000000 - two different facts, indistinguishable.
+    Lowercased, that pair separates to 0.716.
+
+    This corpus is handles, version strings and addresses, so the defect was
+    hitting almost every note, and the [wave / @author / date] header added by
+    contextualize() was itself almost entirely [UNK].
+    """
+    return (text or "")[:8000].lower()
+
+
 def embed(text: str) -> List[float]:
-    d = _post("/api/embeddings", {"model": EMBED_MODEL, "prompt": text[:8000]})
-    v = d.get("embedding")
+    v = embed_many([text])
     if not v:
         raise MemoryError_("embedding model returned nothing")
-    return v
+    return v[0]
+
+
+def embed_many(texts: List[str], keep_alive: Any = "30m") -> List[List[float]]:
+    """Batch embedding. Measured here: 47 ms for one text, 12.7 ms each at a
+    batch of 32, so distillation and re-embedding are several times cheaper
+    in batches. /api/embed also returns L2-normalised vectors."""
+    if not texts:
+        return []
+    payload = {"model": EMBED_MODEL, "input": [_prepare(t) for t in texts],
+               "keep_alive": keep_alive}
+    try:
+        d = _post("/api/embed", payload)
+        out = d.get("embeddings") or []
+    except MemoryError_:
+        out = []
+    if len(out) == len(texts):
+        return out
+    # An older Ollama without /api/embed, or a partial reply: fall back to the
+    # single-text endpoint rather than losing the batch.
+    res = []
+    for t in texts:
+        d = _post("/api/embeddings", {"model": EMBED_MODEL, "prompt": _prepare(t)})
+        v = d.get("embedding")
+        if not v:
+            raise MemoryError_("embedding model returned nothing")
+        res.append(v)
+    return res
 
 
 def _pack(v: Iterable[float]) -> bytes:
-    v = list(v)
-    return struct.pack(f"{len(v)}f", *v)
+    a = array.array("f", v)
+    return a.tobytes()
 
 
-def _unpack(b: bytes) -> List[float]:
-    return list(struct.unpack(f"{len(b)//4}f", b))
+def _unpack(b: bytes):
+    """A float array, not a list. array.array avoids building 768 Python
+    floats per row, which is most of the cost of scanning the corpus."""
+    a = array.array("f")
+    a.frombytes(b)
+    return a
 
 
-def _cosine(a: List[float], b: List[float]) -> float:
-    import math
+# math.sumprod (3.12+) is a C-level fused dot product and the single biggest
+# lever in the scan. The fallback keeps the declared >=3.9 support honest.
+_sumprod = getattr(math, "sumprod", None)
+if _sumprod is None:                                      # pragma: no cover
+    def _sumprod(a, b):
+        return sum(map(_mul, a, b))
 
+
+def _dot(a, b) -> float:
+    return _sumprod(a, b)
+
+
+def _norm(v) -> float:
+    return math.sqrt(_sumprod(v, v))
+
+
+def _cosine(a, b) -> float:
     if len(a) != len(b):
         return -1.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    return dot / (na * nb) if na and nb else -1.0
+    na, nb = _norm(a), _norm(b)
+    return _dot(a, b) / (na * nb) if na and nb else -1.0
 
 
 # ----------------------------------------------------------------- extraction
@@ -390,9 +462,27 @@ class Memory:
         self._fts = False
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
-        self.db = sqlite3.connect(path, timeout=30, isolation_level=None)
+        # 30s of blocking retry in a cron job turns one slow writer into a
+        # pile-up; 5s fails fast enough for the caller to try again later.
+        self.db = sqlite3.connect(path, timeout=5.0, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        for pragma in (
+            # WAL with NORMAL cannot corrupt; it can only lose the last commit
+            # on power loss, which for a memory store is survivable. FULL was
+            # not buying real durability here anyway: macOS needs F_FULLFSYNC
+            # for that, and SQLite only issues it with PRAGMA fullfsync=1.
+            "PRAGMA synchronous=NORMAL",
+            "PRAGMA temp_store=MEMORY",
+            "PRAGMA mmap_size=268435456",
+            # Without a limit the WAL grows and never gives the space back;
+            # this store was carrying a WAL larger than the database.
+            "PRAGMA journal_size_limit=4194304",
+        ):
+            try:
+                self.db.execute(pragma)
+            except sqlite3.Error:
+                pass            # an older build without one of these is fine
         self.db.executescript(SCHEMA)
         self._migrate()
 
@@ -410,6 +500,17 @@ class Memory:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     pass            # index already present, or similar
+        try:
+            missing = self.db.execute(
+                "SELECT id, embedding FROM notes "
+                "WHERE embedding IS NOT NULL AND norm IS NULL").fetchall()
+            if missing:
+                self.db.executemany(
+                    "UPDATE notes SET norm=? WHERE id=?",
+                    [(_norm(_unpack(r["embedding"])), r["id"]) for r in missing])
+        except sqlite3.Error:
+            pass                # norm is an optimisation; recall works without
+
         try:
             self.db.executescript(FTS_SCHEMA)
             # Notes written before the index existed are invisible to it. An
@@ -432,6 +533,10 @@ class Memory:
             return 0
 
     def close(self):
+        try:
+            self.db.execute("PRAGMA optimize")
+        except sqlite3.Error:
+            pass
         self.db.close()
 
     # ---------------- observe ----------------
@@ -520,11 +625,11 @@ class Memory:
                 self.db.execute(
                     "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,"
                     "kind,embedding,created_at,asserted_by,subject,status,"
-                    "source) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
+                    "source,norm) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?)",
                     (text, row["drop_id"], row["wave_id"], row["wave_name"],
                      row["author"], "claim",
                      _pack(vec) if vec else None, int(time.time()),
-                     tier, subject, src),
+                     tier, subject, src, _norm(vec) if vec else None),
                 )
                 kept += 1
             except sqlite3.IntegrityError:
@@ -563,11 +668,12 @@ class Memory:
         try:
             cur = self.db.execute(
                 "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,kind,"
-                "embedding,created_at,asserted_by,subject,status,source) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
+                "embedding,created_at,asserted_by,subject,status,source,norm) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?)",
                 (text, drop_id or f"note-{_hash12(text)}", wave_id, wave_name,
                  author, kind, _pack(vec) if vec else None,
-                 created_at or int(time.time()), tier, subject, source))
+                 created_at or int(time.time()), tier, subject, source,
+                 _norm(vec) if vec else None))
             return cur.lastrowid
         except sqlite3.IntegrityError:
             return None        # already held
@@ -635,8 +741,13 @@ class Memory:
                 if lex:
                     return [self._mk(r, 0.0) for r in lex]
                 return self._keyword_recall(query, k, author, wave_id, source)
+            qn = _norm(qv) or 1.0
             for r in rows:
-                s = _cosine(qv, _unpack(r["embedding"]))
+                v = _unpack(r["embedding"])
+                nb = r["norm"] or _norm(v)
+                if not nb:
+                    continue
+                s = _dot(qv, v) / (qn * nb)
                 if s >= floor:
                     scored.append((s, r))
         scored.sort(key=lambda x: (x[0], x[1]["created_at"] or 0), reverse=True)
@@ -712,7 +823,7 @@ class Memory:
                 # Report its real similarity, not 0.0. It got here on BM25,
                 # below the floor, and a reader needs to see which.
                 best[r["id"]] = (_cosine(qv, _unpack(r["embedding"]))
-                                 if qv and r["embedding"] else 0.0)
+                                 if qv is not None and r["embedding"] else 0.0)
         order = sorted(scores, key=lambda i: scores[i], reverse=True)[:k]
         return [self._mk(rowmap[i], round(best.get(i, 0.0), 3)) for i in order]
 
@@ -768,12 +879,13 @@ class Memory:
         now = int(time.time())
         cur = self.db.execute(
             "INSERT INTO notes(text,drop_id,wave_id,wave_name,author,kind,"
-            "embedding,created_at,asserted_by,subject,status,supersedes) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)",
+            "embedding,created_at,asserted_by,subject,status,supersedes,norm,"
+            "source) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?,?)",
             (new_text, drop_id or old["drop_id"], old["wave_id"],
              old["wave_name"], old["author"], old["kind"],
              _pack(vec) if vec else None, now, old["asserted_by"],
-             old["subject"], note_id))
+             old["subject"], note_id, _norm(vec) if vec else None,
+             _row_source(old)))
         self.db.execute(
             "UPDATE notes SET status='superseded', valid_to=? WHERE id=?",
             (now, note_id))
@@ -816,6 +928,59 @@ class Memory:
         rows = self.db.execute(sql, params).fetchall()
         return [self._mk(r, 1.0) for r in rows]
 
+    def embed_version(self) -> int:
+        try:
+            r = self.db.execute(
+                "SELECT value FROM meta WHERE key='embed_version'").fetchone()
+            return int(r["value"]) if r else 1
+        except (sqlite3.Error, TypeError, ValueError):
+            return 1
+
+    def reembed(self, batch: int = 32, progress=None) -> Dict[str, Any]:
+        """Rebuild every note's vector with the current recipe.
+
+        Vectors made under different recipes are not comparable, so this is
+        all-or-nothing per note and the version is only recorded once the
+        whole corpus is done.
+        """
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        rows = self.db.execute(
+            "SELECT id, text, author, wave_name, created_at FROM notes "
+            "ORDER BY id").fetchall()
+        done = failed = 0
+        for i in range(0, len(rows), batch):
+            chunk = rows[i:i + batch]
+            texts = [contextualize(r["text"], r["author"], r["wave_name"],
+                                   r["created_at"]) for r in chunk]
+            try:
+                vecs = embed_many(texts)
+            except MemoryError_:
+                failed += len(chunk)
+                continue
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                for r, v in zip(chunk, vecs):
+                    self.db.execute(
+                        "UPDATE notes SET embedding=?, norm=? WHERE id=?",
+                        (_pack(v), _norm(v), r["id"]))
+                self.db.execute("COMMIT")
+            except sqlite3.Error:
+                self.db.execute("ROLLBACK")
+                failed += len(chunk)
+                continue
+            done += len(chunk)
+            if progress:
+                progress(done, len(rows))
+        if not failed:
+            self.db.execute(
+                "INSERT INTO meta(key,value) VALUES('embed_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(EMBED_VERSION),))
+        return {"notes": len(rows), "reembedded": done, "failed": failed,
+                "embed_version": self.embed_version(),
+                "model": EMBED_MODEL}
+
     def stats(self) -> Dict[str, Any]:
         q = lambda s: self.db.execute(s).fetchone()[0]
         return {
@@ -829,6 +994,8 @@ class Memory:
             "notes_embedded": q(
                 "SELECT COUNT(*) FROM notes WHERE embedding IS NOT NULL"),
             "authors_known": q("SELECT COUNT(DISTINCT author) FROM notes"),
+            "embed_version": self.embed_version(),
+            "embed_version_current": EMBED_VERSION,
             "by_surface": {
                 r["source"]: {"observations": r["obs"], "notes": r["notes"]}
                 for r in self.db.execute(

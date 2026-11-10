@@ -51,3 +51,47 @@ Junk notes are not inert. `RC9` ranked its own note first at 94 notes and, at
 131, returns "Agent Tree is a paid Pro item" instead. Retrieval quality decays
 as unfiltered material accumulates, so extraction precision is a retrieval
 problem too.
+
+## After the embedding fix, 2026-11-10 (`after-lowercase-20261110.json`)
+
+```
+retrieval    P@1 1.000   recall@5 1.00   MRR 1.000   35 ms/query
+identifiers  2/2 discriminated        (was 1/2)
+ABSTENTION   6/6 out-of-scope queries returned something   <- still broken
+timings      scan 20.2 us/vector -> 202 ms at 10k notes    (was 57.8 / 578)
+```
+
+One `.lower()` did most of that. The local GGUF of nomic-embed-text uses the
+**uncased** BERT vocabulary but never lowercases its input, so every token
+carrying a capital missed the vocab and became `[UNK]`. Measured on this
+machine: `"Axiom"`, `"Melted"`, `"Soulforge"`, `"Bankr"` and a full `0x`
+address all returned the **byte-identical vector** — eight distinct inputs
+collapsing to four. Two unrelated notes, *"Agent Tree is a paid Pro item"* and
+*"Trace Waterfall is a paid Pro item"*, scored cosine **1.000000**; lowercased
+they separate to 0.716.
+
+This corpus is handles, version strings and addresses, so the defect was
+hitting nearly every note — and the `[wave / @author / date]` header added by
+`contextualize()` was itself almost entirely `[UNK]`, which is why that header
+underperformed when it was first measured.
+
+Abstention is untouched by this and is the next thing to fix.
+
+## Known limit: cosine cannot see negation
+
+Measured on the re-embedded corpus, a claim against its own negation:
+
+| cosine | claim vs negation |
+|---|---|
+| 0.9843 | device keys *can not* move funds / *can* move funds |
+| 0.9798 | home validators connect *outbound* only / *inbound* only |
+| 0.9714 | tor is *on* by default / *off* by default |
+| 0.9347 | signed posts *expire after 180 days* / *never expire* |
+
+Retrieval is unharmed — asked "can device keys move funds", it returns the
+note that answers it, which is correct. The consequence is narrower and
+sharper: **no note-to-note similarity rule can be trusted to mean agreement.**
+Any dedup, auto-supersession or corroboration-counting threshold below ~0.985
+would fuse a claim with its opposite. That is why `supersede()` takes an
+explicit id and deduplication is the exact `UNIQUE(drop_id, text)` constraint,
+and it should stay that way.

@@ -947,13 +947,17 @@ def mem(tmp_path, monkeypatch):
 
 
 def _fake_local(monkeypatch, claims=None, vec=None):
-    """Stub Ollama so tests never need a running model."""
+    """Stub Ollama so tests never need a running model. Covers both the batch
+    endpoint and the single-text fallback."""
+    def one(text):
+        return vec if vec is not None else [
+            float(text.lower().count(ch)) for ch in "abcdefgh"]
+
     def post(path, payload, timeout=120):
+        if path == "/api/embed":
+            return {"embeddings": [one(t) for t in payload["input"]]}
         if path == "/api/embeddings":
-            text = payload["prompt"]
-            v = vec if vec is not None else [
-                float(text.lower().count(ch)) for ch in "abcdefgh"]
-            return {"embedding": v}
+            return {"embedding": one(payload["prompt"])}
         return {"response": json.dumps(claims if claims is not None else [])}
     monkeypatch.setattr(mem_mod, "_post", post)
 
@@ -1304,6 +1308,9 @@ def test_embedding_includes_context_header(mem, monkeypatch):
     seen = []
 
     def post(path, payload, timeout=120):
+        if path == "/api/embed":
+            seen.extend(payload["input"])
+            return {"embeddings": [[1.0, 0.0] for _ in payload["input"]]}
         if path == "/api/embeddings":
             seen.append(payload["prompt"])
             return {"embedding": [1.0, 0.0]}
@@ -1312,7 +1319,8 @@ def test_embedding_includes_context_header(mem, monkeypatch):
     mem.observe("d1", "a long post about validators signing every day here",
                 "alice", "w1", "Dev Wave", created_at=1794075815)
     mem.learn_batch()
-    assert seen and seen[0].startswith("[Dev Wave / @alice"), seen
+    # lowercased on the way to the model, header and all
+    assert seen and seen[0].startswith("[dev wave / @alice"), seen
 
 
 def test_floor_is_above_the_model_noise_floor():
@@ -1338,10 +1346,14 @@ def test_relative_gap_drops_weak_trailing_hits(mem, monkeypatch):
     import math
     vecs = {"strong": [1.0, 0.0], "weak": [0.6, 0.8]}
 
+    def pick(p):
+        return vecs["weak"] if "weak" in p else vecs["strong"]
+
     def post(path, payload, timeout=120):
+        if path == "/api/embed":
+            return {"embeddings": [pick(t) for t in payload["input"]]}
         if path == "/api/embeddings":
-            p = payload["prompt"]
-            return {"embedding": vecs["weak"] if "weak" in p else vecs["strong"]}
+            return {"embedding": pick(payload["prompt"])}
         return {"response": json.dumps([payload["prompt"].split('"')[-2][:40]])}
     monkeypatch.setattr(mem_mod, "_post", post)
     mem.observe("d1", "a long post containing the strong matching subject here",
@@ -2106,3 +2118,92 @@ def test_about_finds_notes_the_agent_wrote_about_someone(mem, monkeypatch):
     mem.remember("@bentlegen is secretly a cat", author="mallory",
                  subject="bentlegen", source="twitter")
     assert len(mem.about("bentlegen", source="twitter")) == 1
+
+
+# ------------------------------------------------- vector maths
+def test_dot_and_cosine_agree_with_the_naive_definition():
+    """The fast path must be numerically identical, not merely close."""
+    import math as _m
+    a = [0.1*i - 2.0 for i in range(64)]
+    b = [0.03*i + 0.5 for i in range(64)]
+    naive_dot = sum(x*y for x, y in zip(a, b))
+    assert abs(mem_mod._dot(a, b) - naive_dot) < 1e-9
+    naive_cos = naive_dot / (_m.sqrt(sum(x*x for x in a)) * _m.sqrt(sum(y*y for y in b)))
+    assert abs(mem_mod._cosine(a, b) - naive_cos) < 1e-9
+    assert mem_mod._cosine([1.0, 0.0], [1.0, 0.0, 0.0]) == -1.0
+
+
+def test_pack_unpack_roundtrips_through_an_array():
+    v = [0.5, -0.25, 1.0, 0.0]
+    out = mem_mod._unpack(mem_mod._pack(v))
+    assert list(out) == v
+    assert len(out) == 4
+
+
+def test_a_notes_norm_is_stored_and_used(mem, monkeypatch):
+    """Recomputing the stored vector's length on every row was most of the
+    scan. It never changes once written."""
+    _fake_local(monkeypatch, claims=["a durable claim"], vec=[3.0, 4.0])
+    mem.observe("d1", "a long enough post to be considered for learning here",
+                "alice", "w1")
+    mem.learn_batch()
+    row = mem.db.execute("SELECT norm, embedding FROM notes").fetchone()
+    assert row["norm"] is not None
+    assert abs(row["norm"] - 5.0) < 1e-6, "3-4-5"
+    assert mem.recall("anything", k=3)
+
+
+def test_an_older_database_backfills_missing_norms(tmp_path, monkeypatch):
+    """The live store predates the column; rows without a norm must not
+    silently drop out of recall."""
+    path = str(tmp_path / "m.sqlite")
+    m = mem_mod.Memory(path)
+    _fake_local(monkeypatch, claims=["a durable claim"], vec=[3.0, 4.0])
+    m.observe("d1", "a long enough post to be considered for learning here",
+              "alice", "w1")
+    m.learn_batch()
+    m.db.execute("UPDATE notes SET norm=NULL")      # simulate a pre-migration row
+    m.close()
+
+    m = mem_mod.Memory(path)
+    try:
+        assert m.db.execute("SELECT norm FROM notes").fetchone()["norm"] is not None
+        assert m.recall("anything", k=3)
+    finally:
+        m.close()
+
+
+def test_text_is_lowercased_before_embedding():
+    """Not cosmetic. The local GGUF of nomic-embed-text uses the uncased BERT
+    vocabulary without lowercasing its input, so every capitalised token
+    becomes [UNK]. Measured on the live model: "Axiom", "Melted", "Soulforge"
+    and a full 0x address all returned the byte-identical vector."""
+    assert mem_mod._prepare("Axiom @MeltedMindz RC.13") == "axiom @meltedmindz rc.13"
+    assert mem_mod._prepare(None) == ""
+    assert len(mem_mod._prepare("x" * 20000)) == 8000
+
+
+def test_embed_many_batches_and_falls_back(monkeypatch):
+    calls = []
+
+    def post(path, payload, timeout=120):
+        calls.append(path)
+        if path == "/api/embed":
+            return {"embeddings": [[1.0, 0.0]] * len(payload["input"])}
+        raise AssertionError("should not reach the fallback")
+    monkeypatch.setattr(mem_mod, "_post", post)
+    assert len(mem_mod.embed_many(["A", "B", "C"])) == 3
+    assert calls == ["/api/embed"], "one request for the whole batch"
+    assert mem_mod.embed_many([]) == []
+
+    # an older server without /api/embed must still work
+    calls.clear()
+
+    def old(path, payload, timeout=120):
+        calls.append(path)
+        if path == "/api/embed":
+            raise mem_mod.MemoryError_("404")
+        return {"embedding": [1.0, 0.0]}
+    monkeypatch.setattr(mem_mod, "_post", old)
+    assert len(mem_mod.embed_many(["A", "B"])) == 2
+    assert calls == ["/api/embed", "/api/embeddings", "/api/embeddings"]

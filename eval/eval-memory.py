@@ -140,12 +140,17 @@ def timings(mem):
         lat.append(time.time() - t0)
     lat.sort()
     rows = mem.db.execute(
-        "select embedding from notes where embedding is not null").fetchall()
+        "select embedding, norm from notes where embedding is not null").fetchall()
     qv = mem_mod.embed("probe")
+    # Time the path recall() actually takes, not a lookalike.
     t0 = time.time()
     for _ in range(10):
+        qn = mem_mod._norm(qv) or 1.0
         for r in rows:
-            mem_mod._cosine(qv, mem_mod._unpack(r["embedding"]))
+            v = mem_mod._unpack(r["embedding"])
+            nb = r["norm"] or mem_mod._norm(v)
+            if nb:
+                mem_mod._dot(qv, v) / (qn * nb)
     scan = (time.time() - t0) / 10
     return {
         "embed_first_call_ms": round(cold * 1000, 1),

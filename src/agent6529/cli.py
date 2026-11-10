@@ -943,6 +943,25 @@ def cmd_observe(args) -> int:
     return 0
 
 
+def cmd_reembed(args) -> int:
+    """Rebuild every vector with the current embedding recipe."""
+    from agent6529 import memory as mem_mod
+
+    mem = mem_mod.Memory()
+    try:
+        before = mem.embed_version()
+        if before == mem_mod.EMBED_VERSION and not args.force:
+            out({"skipped": "already on the current embedding recipe",
+                 "embed_version": before, "fix": "pass --force to rebuild anyway"})
+            return 0
+        res = mem.reembed(batch=args.batch)
+        res["was"] = before
+        out(res)
+        return 0 if not res["failed"] else 2
+    finally:
+        mem.close()
+
+
 def cmd_forget(args) -> int:
     """Retract a claim. Rows are closed, never deleted, so the same claim
     cannot be quietly re-learned from the archive."""
@@ -1197,6 +1216,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)
+
+    sp = sub.add_parser("reembed",
+                        help="rebuild every vector with the current recipe")
+    sp.add_argument("--batch", type=int, default=32)
+    sp.add_argument("--force", action="store_true")
+    sp.set_defaults(fn=cmd_reembed)
 
     sp = sub.add_parser("observe",
                         help="record something said on another surface")
