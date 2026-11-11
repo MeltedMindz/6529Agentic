@@ -100,6 +100,21 @@ def redact(obj: Any) -> Any:
 # Signer
 # --------------------------------------------------------------------------
 @dataclass
+class TypedDataUnsupported(SixtyFiveError):
+    """This signer cannot produce an EIP-712 signature.
+
+    Raised rather than faked. A device grant is a typed-data signature, and a
+    personal_sign of the same bytes is a different signature that the server
+    will reject - silently substituting one would look like a server bug.
+    """
+
+
+# A signer is anything with `address` and `sign_message_exact`. To also
+# register a device grant it needs `sign_typed_data`. The two are separate on
+# purpose: every signer can authenticate, only some can grant, and a signer
+# that cannot should say so instead of guessing.
+
+
 class KeychainSigner:
     """EIP-191 personal_sign using a key held in the macOS Keychain.
 
@@ -139,6 +154,26 @@ class KeychainSigner:
             finally:
                 del key
         return self._address
+
+    def sign_typed_data(self, typed_data: Dict[str, Any]) -> str:
+        """EIP-712 signature, for registering a device grant.
+
+        The key is read at signing time and dropped immediately, as with
+        personal_sign.
+        """
+        from eth_account import Account
+        from eth_account.messages import encode_typed_data
+
+        key = self._read_key()
+        try:
+            signed = Account.sign_typed_data(key, full_message=typed_data)
+        except AttributeError:          # older eth-account
+            signed = Account.sign_message(
+                encode_typed_data(full_message=typed_data), key)
+        finally:
+            del key
+        return signed.signature.hex() if not isinstance(
+            signed.signature, str) else signed.signature
 
     def sign_message_exact(self, signable_message: str) -> str:
         """personal_sign over the exact server-provided string.
@@ -188,6 +223,34 @@ class BankrSigner:
             raise SixtyFiveError(
                 f"refusing to sign with denylisted wallet {self.address}"
             )
+
+    def sign_typed_data(self, typed_data: Dict[str, Any]) -> str:
+        """EIP-712 via the Bankr CLI, when the installed build supports it.
+
+        Bankr holds the key remotely, so this works only if its CLI exposes
+        typed-data signing. When it does not, say so plainly: the caller can
+        register the grant with a different signer and keep using Bankr for
+        everything else, since the device key signs writes on its own
+        afterwards.
+        """
+        import json as _json
+        r = subprocess.run(
+            [self.bankr_bin, "wallet", "sign",
+             "--type", "eth_signTypedData_v4",
+             "--message", _json.dumps(typed_data, separators=(",", ":"))],
+            capture_output=True, text=True, timeout=self.timeout,
+        )
+        if r.returncode != 0:
+            raise TypedDataUnsupported(
+                "this Bankr build does not sign EIP-712 typed data. Register "
+                "the device grant with a signer that does; writes afterwards "
+                "are signed by the device key, not the wallet."
+            )
+        sig = (r.stdout or "").strip().split()[-1]
+        if not sig.startswith("0x") or len(sig) < 130:
+            raise TypedDataUnsupported(
+                f"Bankr returned something that is not a signature: {sig[:40]}")
+        return sig
 
     def sign_message_exact(self, signable_message: str) -> str:
         """Sign the exact server string. No normalisation of any kind."""

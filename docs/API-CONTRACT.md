@@ -208,3 +208,60 @@ POST /drop-media/multipart-upload/completion {upload_id, key, parts:[{part_no, e
 **no `active` field**. Verified 2026-11-08: The Memes - Main Stage listed three
 pauses, all from 2025 and long finished. Treating the absence of `active` as
 "paused" marks a fully open Wave as closed. Compare the window against now.
+
+## Device grants and signed writes
+
+Verified 2026-11-11 against the published spec **and** the reference client
+(`6529-Collections/6529-core`, `renderer/lib/device-signing/`), because the
+spec documents the field semantics but not the exact typed-data tuples.
+
+**The grant** is EIP-712 `DeviceGrant`:
+
+| | |
+|---|---|
+| domain name | `6529 Device Grant` |
+| version | `"2"` (`uint16[] ciphersuites`) or `"1"` (`uint16 ciphersuite`) |
+| salt | `0x4887f15a…c8aa` |
+| fields | `statement, wallet, deviceKey, scopes, mlsDeviceKey, ciphersuite(s), issuedAt, expiresAt, origin` |
+
+The **grant id is the EIP-712 digest** of that message, lowercase.
+
+Three things are easy to get wrong:
+
+- **The statement is signed, not displayed.** The server re-renders it from
+  the grant fields and compares; a single changed character fails
+  verification. It is deliberately never localized.
+- **`expires_at` is minute aligned** and at most **181 days** after
+  `issued_at`. The reference client uses 180.
+- **`scopes` is a comma-joined string inside the typed data**, but an array
+  in the request body. Canonical order `post, edit, delete, react, vote`,
+  and `post` is mandatory.
+
+**Each write** signs EIP-712 `InterimEvent`:
+
+| | |
+|---|---|
+| domain name | `6529 Network P2P`, version `"1"` |
+| salt | `keccak256("6529 Network pre-genesis interim 1")` |
+| fields | `kind, kindVersion, wave, author, keyType, deviceKey, authRef, seq, anchor, claimedTime, refs, bodyHash, bodySize` |
+
+The device signature is **Ed25519 over the event id bytes**, not over its hex
+text, and `key_type` is `2`. `kind` is 1 POST, 2 EDIT, 3 TOMBSTONE, 4 REACT.
+
+- `bodyHash` is `keccak256` of the **canonical JSON** of the request body with
+  `device_signature` removed; `bodySize` is that string's UTF-8 byte length.
+  Canonical means keys sorted by UTF-16 code unit, no whitespace, non-ASCII
+  left unescaped.
+- `claimed_time` is epoch **milliseconds** and must be within **10 minutes**
+  of server time — so a write is signed when it is sent, not when it is
+  drafted.
+- `seq` must be **unique per device key**; a reused value is rejected, so
+  allocate and persist it before the request goes out. A gap is harmless.
+- A rejected signature returns **400** with a message starting
+  `Invalid device signature:`, and the write does not happen.
+
+**Worth knowing:** the two domains share one salt. The value `app-grant.ts`
+hardcodes for grants is exactly `keccak256("6529 Network pre-genesis interim 1")`
+— which is what the spec means by "the 6529 pre-genesis salt". Deriving it
+independently and getting the same bytes is a useful check that the rest is
+right.

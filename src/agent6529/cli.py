@@ -946,6 +946,102 @@ def cmd_observe(args) -> int:
     return 0
 
 
+def _device_store():
+    from agent6529 import device as dev
+    from agent6529.state import STATE_DIR
+
+    return dev.DeviceStore(os.path.join(STATE_DIR, "device.json"))
+
+
+def cmd_device(args) -> int:
+    """Register, inspect or drop a device signing grant."""
+    from agent6529 import device as dev
+
+    cfg = pol.load_config()
+    store = _device_store()
+
+    if args.device_cmd == "status":
+        grant = store.grant()
+        key = store.read().get("device_key")
+        out({
+            "device_key": key,
+            "fingerprint": dev.key_fingerprint(key) if key else None,
+            "grant": grant,
+            "expires_in_days": (
+                round((grant["expires_at"] - time.time()) / 86400, 1)
+                if grant and grant.get("expires_at") else None),
+            "seq": store.read().get("seq", 0),
+            "signing": bool(grant) and cfg.get("sign_drops", True),
+            "note": None if grant else "no grant yet: 6529 device grant",
+        })
+        return 0
+
+    if args.device_cmd == "forget":
+        store.forget_grant()
+        out({"forgotten": True,
+             "note": "the key is kept; revoke the grant on 6529.io too"})
+        return 0
+
+    # grant
+    api = build_api(cfg)
+    ident = cfg.get("identity") or {}
+    wallet = ident.get("expected_address")
+    if not wallet:
+        out({"error": "no expected_address configured",
+             "fix": "6529 config --expected-address 0x..."})
+        return 2
+    key = store.ensure_key()
+    issued, expires = dev.grant_times()
+    scopes = args.scopes.split(",") if args.scopes else list(dev.DEFAULT_SCOPES)
+    try:
+        typed = dev.build_grant_typed_data(
+            wallet=wallet, device_key_hex=key.public_hex, scopes=scopes,
+            issued_at=issued, expires_at=expires, origin=args.origin,
+            version=args.grant_version)
+    except dev.DeviceSigningError as e:
+        out({"error": str(e)})
+        return 2
+
+    if args.dry_run:
+        out({"would_register": dev.grant_request(typed, "0x<wallet signature>",
+                                                 args.label),
+             "statement": typed["message"]["statement"],
+             "grant_id": dev.grant_id(typed),
+             "device_key": key.public_hex,
+             "note": "nothing was signed or sent"})
+        return 0
+
+    signer = api.signer
+    if not hasattr(signer, "sign_typed_data"):
+        out({"error": "this signer cannot sign EIP-712 typed data",
+             "signer": type(signer).__name__,
+             "fix": "register the grant with a signer that can; writes "
+                    "afterwards are signed by the device key, not the wallet"})
+        return 2
+    try:
+        signature = signer.sign_typed_data(dev._for_eth_account(typed))
+    except c.TypedDataUnsupported as e:
+        out({"error": str(e), "signer": type(signer).__name__})
+        return 2
+
+    body = dev.grant_request(typed, signature, args.label)
+    res = api.post("/device-grants", body)
+    grant = res.get("grant") or res
+    grant.setdefault("id", dev.grant_id(typed))
+    grant.setdefault("wallet", wallet)
+    grant.setdefault("device_key", key.public_hex)
+    grant.setdefault("scopes", scopes)
+    grant.setdefault("expires_at", expires)
+    store.save_grant(grant)
+    out({"registered": True, "grant_id": grant.get("id"),
+         "device_key": key.public_hex,
+         "fingerprint": key.fingerprint(),
+         "scopes": grant.get("scopes"),
+         "expires": time.strftime("%Y-%m-%d", time.gmtime(expires)),
+         "next": "drops are signed from now on; 6529 device status"})
+    return 0
+
+
 def cmd_reembed(args) -> int:
     """Rebuild every vector with the current embedding recipe."""
     from agent6529 import memory as mem_mod
@@ -1222,6 +1318,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sp = sub.add_parser("memory", help="memory statistics")
     sp.set_defaults(fn=cmd_memory)
+
+    sp = sub.add_parser("device",
+                        help="device signing: grant, status, forget")
+    dsub = sp.add_subparsers(dest="device_cmd", required=True)
+    g = dsub.add_parser("grant", help="register this device with your wallet")
+    g.add_argument("--origin", default="6529Agentic",
+                   help="what the signed statement names, <=64 printable ASCII")
+    g.add_argument("--label", default=None, help="name shown in Preferences")
+    g.add_argument("--scopes", default=None,
+                   help="comma separated; must include post "
+                        "(default post,edit,delete,react)")
+    g.add_argument("--grant-version", type=int, default=2, choices=[1, 2])
+    g.add_argument("--dry-run", action="store_true",
+                   help="print the exact statement and body, sign nothing")
+    dsub.add_parser("status", help="the current device key and grant")
+    dsub.add_parser("forget", help="drop the local grant (revoke on 6529.io too)")
+    sp.set_defaults(fn=cmd_device)
 
     sp = sub.add_parser("reembed",
                         help="rebuild every vector with the current recipe")
