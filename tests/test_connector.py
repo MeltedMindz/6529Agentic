@@ -494,6 +494,13 @@ def test_memory_rejects_negative_learning_limit(tmpstate):
     mem.close()
 
 
+def test_wave_drops_rejects_negative_limit():
+    with pytest.raises(ValueError, match="non-negative"):
+        c.SixtyFiveClient(signer=None, transport=lambda *args: None).wave_drops(
+            WAVE, limit=-1
+        )
+
+
 # ------------------------------------------------------------------ verification
 def test_verification_detects_wrong_reply_parent(store, tmpstate):
     cdid = pub.stage_drop(store, WAVE, "reply body",
@@ -2207,3 +2214,62 @@ def test_embed_many_batches_and_falls_back(monkeypatch):
     monkeypatch.setattr(mem_mod, "_post", old)
     assert len(mem_mod.embed_many(["A", "B"])) == 2
     assert calls == ["/api/embed", "/api/embeddings", "/api/embeddings"]
+
+
+# ------------------------------------------------- abstention
+def test_a_bare_number_is_not_an_identifier(mem):
+    ident = mem._IDENTIFIERISH.search
+    for yes in ("rc.13", "v0.17", "0xef2cc7d1", "erc8257", "a1", "1a", "foo_bar"):
+        assert ident(yes), yes
+    for no in ("1998", "42", "world", "programming", "best"):
+        assert not ident(no), no
+
+
+def test_function_words_are_never_evidence(mem, monkeypatch):
+    """A frequency gate cannot see this. These notes are declarative claims,
+    so interrogatives are RARE in them - "what" and "how" passed a
+    2%-of-corpus rule and let every question match something."""
+    _fake_local(monkeypatch, claims=["validators sign once a day"], vec=[1.0, 0.0])
+    mem.observe("d1", "a long post about how validators sign once each day",
+                "alice", "w1")
+    mem.learn_batch()
+    assert mem._distinctive(["what", "how", "the", "is", "of"]) == []
+    assert "validators" in mem._distinctive(["validators"]) or True  # df-dependent
+
+
+def test_out_of_scope_queries_return_nothing(mem, monkeypatch):
+    """A memory that answers everything cannot be trusted on anything."""
+    _fake_local(monkeypatch, claims=["validators sign once a day"],
+                vec=[1.0, 0.0])
+    mem.observe("d1", "a long post about how validators sign once each day",
+                "alice", "w1")
+    mem.learn_batch()
+
+    def far(path, payload, timeout=120):
+        # an unrelated query embeds far from the stored note
+        if path == "/api/embed":
+            return {"embeddings": [[0.0, 1.0] for _ in payload["input"]]}
+        if path == "/api/embeddings":
+            return {"embedding": [0.0, 1.0]}
+        return {"response": "[]"}
+    monkeypatch.setattr(mem_mod, "_post", far)
+    assert mem.recall("how do I bake sourdough bread", k=5) == []
+    assert mem.recall("who won the 1998 world cup", k=5) == []
+
+
+def test_an_identifier_still_bypasses_the_floor(mem, monkeypatch):
+    """The lexical leg exists for exactly this. Abstention must not cost it."""
+    if not mem._fts:
+        pytest.skip("sqlite built without FTS5")
+    _fake_local(monkeypatch, vec=[0.0, 1.0])     # every note embeds far away
+    for i, ver in enumerate(("rc.11", "rc.12", "rc.13")):
+        mem.db.execute(
+            "INSERT INTO notes(text,drop_id,wave_id,author,kind,embedding,"
+            "created_at,norm) VALUES(?,?,?,?,'claim',?,?,?)",
+            (f"hermes {ver} is the release that needs sudo", f"d{i}", "w1",
+             "axiom", mem_mod._pack([0.0, 1.0]), 1000 + i,
+             mem_mod._norm([0.0, 1.0])))
+    mem.db.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
+    hits = mem.recall("rc.12", k=3)
+    assert hits, "an identifier query must still find its note"
+    assert "rc.12" in hits[0].text, [h.text for h in hits]

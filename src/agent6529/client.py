@@ -632,6 +632,8 @@ class SixtyFiveClient:
 
     def wave_drops(self, wave_id, limit=20, serial_no_limit=None,
                    search_strategy="FIND_OLDER", drop_type=None) -> Any:
+        if limit < 0:
+            raise ValueError("drop limit must be non-negative")
         return self._read(
             f"/v2/waves/{wave_id}/drops",
             params={

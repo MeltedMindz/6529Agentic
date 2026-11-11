@@ -95,3 +95,39 @@ Any dedup, auto-supersession or corroboration-counting threshold below ~0.985
 would fuse a claim with its opposite. That is why `supersede()` takes an
 explicit id and deduplication is the exact `UNIQUE(drop_id, text)` constraint,
 and it should stay that way.
+
+## Abstention fixed, 2026-11-11 (`after-abstention-20261111.json`)
+
+```
+retrieval    P@1 1.000   recall@5 1.00   MRR 1.000
+identifiers  2/2 discriminated
+ABSTENTION   0/6 out-of-scope queries returned anything   (was 6/6)
+```
+
+Three gates, each added because the previous one was not enough, and each
+measured rather than assumed.
+
+**A floor that is actually a boundary.** After the lowercase repair, the
+lowest correct answer scores 0.599 and the best any out-of-scope query
+achieves is 0.552, so `MIN_SCORE = 0.57` sits between them. That gap did not
+exist before: while every capitalised token embedded to `[UNK]`, *"what is
+the capital of France"* scored 0.597 against a note about TDH addresses.
+Repairing the embedder is what made abstention possible at all.
+
+**A stoplist, because rarity is not informativeness.** A document-frequency
+gate alone kept `what` and `how` — in a corpus of declarative claims,
+interrogatives are *rare*, so they passed a 2%-of-corpus rule and let every
+question match something. Frequency cannot see that a word is a function
+word; a list can.
+
+**An identifier requirement for the bypass.** The lexical leg exists to tell
+`rc.12` from `rc.13`, so it may skip the cosine floor only when the query
+actually contains an identifier. A plain content word matching one note is
+not evidence — that is how this store came to answer *"what is the best
+programming language"* with a note about a DJ set. A bare number is not an
+identifier either: `1998` in *"who won the 1998 world cup"* says nothing
+here. Without an identifier the lexical rows can still re-rank, but only
+among notes the dense leg already admitted.
+
+The margin is 0.047 wide on a small sample, so it is a calibration to
+re-measure as the corpus grows, not a constant.

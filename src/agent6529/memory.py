@@ -702,7 +702,19 @@ class Memory:
     # nothing and the agent could never answer "I don't know" - it always
     # returned k confident-looking irrelevant memories. These numbers are
     # model-specific; recalibrate if the embedding model changes.
-    MIN_SCORE = 0.50          # absolute floor, for abstention
+    # Measured on this corpus AFTER the lowercase fix, over 12 in-scope and 6
+    # out-of-scope queries: the lowest correct answer scores 0.599, the best
+    # any out-of-scope query achieves is 0.552. 0.57 sits between them.
+    #
+    # That gap did not exist before: while every capitalised token embedded to
+    # [UNK], "what is the capital of France" scored 0.597 against a note about
+    # TDH addresses, overlapping real answers. Repairing the embedder is what
+    # made abstention possible at all - the floor was unreachable decoration
+    # until then.
+    #
+    # The margin is 0.047 wide and rests on a small sample, so treat it as a
+    # calibration to re-measure when the corpus changes, not a constant.
+    MIN_SCORE = 0.57          # absolute floor, for abstention
     RELATIVE_GAP = 0.06       # drop anything well below the best hit
 
     def recall(self, query: str, k: int = 5, author: Optional[str] = None,
@@ -763,14 +775,81 @@ class Memory:
         # characters it contains, so "rc.11" and "rc.12" land almost on top of
         # each other. Lexical search is the only half that separates them, and
         # this content is full of versions, handles and addresses.
-        # A lexical hit deliberately bypasses the cosine floor: an exact
-        # identifier match is strong evidence even when the embedding is cold.
+        # The lexical leg exists to catch identifiers that embeddings blur -
+        # rc.12 against rc.13. So it may bypass the cosine floor only when the
+        # query actually contains an identifier. A plain content word matching
+        # one note is not evidence, and letting those through is what made
+        # this store answer "what is the best programming language".
+        #
+        # Without an identifier the lexical rows can still re-rank, but only
+        # among notes the dense leg already admitted.
         lex = self._lexical(query, k * 2, author, wave_id, source)
+        if lex and not self._has_identifier(query):
+            admitted = {r["id"] for _, r in scored}
+            lex = [r for r in lex if r["id"] in admitted]
         if lex:
             return self._fuse(scored, lex, k, qv)
         if not scored and not rows:
             return self._keyword_recall(query, k, author, wave_id, source)
         return [self._mk(r, round(s, 3)) for s, r in scored]
+
+    # A term is "distinctive" if it looks like an identifier - a version, a
+    # handle, an address - which is the only reason the lexical leg exists.
+    # Mixed alphanumerics, or dotted/underscored/hex shapes: rc.13, v0.17,
+    # 0xef2cc7d1, erc8257. A BARE number is not an identifier - "1998" in
+    # "who won the 1998 world cup" is not evidence about anything here.
+    _IDENTIFIERISH = re.compile(
+        r"^0x[0-9a-f]+$|[a-z][0-9]|[0-9][a-z]|[._]", re.I)
+
+    # Function words are never evidence, and a frequency gate cannot see that.
+    # These notes are declarative claims, so interrogatives are RARE in them:
+    # "what" and "how" both passed a 2%-of-corpus rule and let every question
+    # ever asked match something. Rarity is not the same as informativeness.
+    _STOPWORDS = frozenset("""
+        a an and are as at be been but by can could did do does for from get
+        got had has have how i if in into is it its may me might must my no
+        not of on or our should so some than that the their them then there
+        these they this those to use used using was we were what when where
+        which who whom why will with would you your about after all any
+        because before between both during each few more most other over same
+        such only own too very just also like make made want need know
+    """.split())
+    # How common a term may be before it stops being evidence of anything.
+    MAX_DF_RATIO = 0.02
+
+    def _has_identifier(self, query: str) -> bool:
+        terms = re.findall(r"[\w.]{2,}", query or "")
+        return any(self._IDENTIFIERISH.search(t) for t in terms)
+
+    def _distinctive(self, terms: List[str]) -> List[str]:
+        """Drop terms that match a large share of the corpus.
+
+        Without this, "the" matched 66 of 131 notes, so every English question
+        matched something and the lexical leg answered everything. A term is
+        kept when it looks like an identifier, or when it is rare enough to be
+        evidence.
+        """
+        total = self.db.execute(
+            "SELECT COUNT(*) c FROM notes WHERE status='active'").fetchone()["c"]
+        if not total:
+            return []
+        cap = max(2, int(total * self.MAX_DF_RATIO))
+        kept = []
+        for t in terms:
+            if self._IDENTIFIERISH.search(t):
+                kept.append(t)
+                continue
+            if t.lower() in self._STOPWORDS or len(t) < 4:
+                continue
+            try:
+                df = self.db.execute(
+                    "SELECT COUNT(*) c FROM notes_fts WHERE notes_fts MATCH ?",
+                    (f'"{t}"',)).fetchone()["c"]
+            except sqlite3.Error:
+                continue
+            if 0 < df <= cap:
+                kept.append(t)
+        return kept
 
     def _lexical(self, query: str, k: int, author, wave_id,
                  source=None) -> List[sqlite3.Row]:
@@ -778,6 +857,7 @@ class Memory:
         if not self._fts:
             return []
         terms = [t for t in re.findall(r"[\w.]{2,}", query or "")][:12]
+        terms = self._distinctive(terms)
         if not terms:
             return []
         match = " OR ".join(f'"{t}"' for t in terms)
@@ -841,6 +921,7 @@ class Memory:
     def _keyword_recall(self, query: str, k: int, author, wave_id,
                         source=None) -> List[Recalled]:
         words = [w.lower() for w in re.findall(r"\w{4,}", query)][:8]
+        words = self._distinctive(words) if self._fts else words
         if not words:
             return []
         sql = ("SELECT * FROM notes WHERE status = 'active'"
