@@ -49,6 +49,33 @@ def stage_drop(
     )
 
 
+def _attach_device_signature(payload: Dict[str, Any]) -> Optional[str]:
+    """Sign this write with the device key, if a usable grant exists.
+
+    Never fatal. An agent that cannot sign should still post - an unsigned
+    drop is the status quo, a failed publish is a regression.
+    """
+    try:
+        from agent6529 import device as dev
+        from agent6529.state import STATE_DIR
+        import os as _os
+
+        store = dev.DeviceStore(_os.path.join(STATE_DIR, "device.json"))
+        grant = store.grant()
+        if not grant:
+            return None
+        key = store.key()
+        if key is None:
+            return None
+        seq = store.next_seq()
+        payload["device_signature"] = dev.sign_write(
+            key=key, grant=grant, wave_id=payload.get("wave_id") or "",
+            body=payload, seq=seq, kind=dev.KIND_POST)
+        return f"signed with device key {key.fingerprint()} seq {seq}"
+    except Exception as e:                  # signing is optional, posting is not
+        return f"not signed: {str(e)[:120]}"
+
+
 def send_staged(
     api: "c.SixtyFiveClient",
     store,
@@ -71,6 +98,13 @@ def send_staged(
     # The frozen payload must still carry the same idempotency key.
     assert payload.get("client_drop_id") == client_drop_id
 
+    # A device signature, when this agent has a grant. Attached here rather
+    # than at staging time because `claimed_time` must be within ten minutes
+    # of the server's clock, and a draft can sit for hours. `seq` is
+    # allocated and persisted before the request goes out: a gap from an
+    # unused number is harmless, a reused one is rejected.
+    sig_note = _attach_device_signature(payload)
+
     store.set_status(client_drop_id, "pending")
     delay, last = 1.0, None
 
@@ -83,7 +117,8 @@ def send_staged(
             store.set_status(client_drop_id, "sent", server_drop_id=sid,
                              bump_attempts=True)
             result = {"status": "sent", "server_drop_id": sid,
-                      "client_drop_id": client_drop_id}
+                      "client_drop_id": client_drop_id,
+                      "device_signature": sig_note}
             if verify:
                 result["verification"] = verify_drop(
                     api, store, client_drop_id, sid, payload

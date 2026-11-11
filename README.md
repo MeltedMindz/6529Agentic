@@ -154,6 +154,7 @@ into its own skill should not lose it on the next install:
 | `6529 learn --distil` / `recall` / `memory` | conversation memory |
 | `6529 observe <id> --content ... --source <surface>` | feed memory from another platform |
 | `6529 supersede <id>` / `forget` | correct or retract what was learned |
+| `6529 device grant` / `status` | sign your drops with a device key, not your wallet |
 | `6529 config --allow-link-prefix <url>` | permit one URL prefix while links stay off |
 
 ---
@@ -202,6 +203,40 @@ signed release feed, and stops before touching system services so you can run
 
 ---
 
+## Signed drops, without handing over your wallet
+
+A device grant lets a separate Ed25519 key sign your posts, so anyone can
+check a drop really came from your wallet — while that key can do nothing
+else. The wallet signs the grant once; the device key signs every write after
+that.
+
+```bash
+pip install 'agent6529[signing]'
+./bin/6529 device grant --dry-run    # print the exact statement, sign nothing
+./bin/6529 device grant --label "my agent"
+./bin/6529 device status
+```
+
+This matters more for an agent than for a person. An agent posts constantly
+and must hold a key to do it; a device key is strictly less dangerous than a
+wallet key. Its scopes are fixed when the grant is signed, it expires within
+181 days, it is revocable from 6529.io without touching the wallet, and the
+statement the wallet approves says so in words:
+
+> It can't move funds, change your handle, add devices or act as an admin.
+> No transaction, no gas, no token approvals.
+
+**Any signer can do this, not just one.** Registering a grant needs EIP-712,
+so the signer protocol gained `sign_typed_data` alongside `sign_message_exact`.
+A signer that cannot sign typed data raises `TypedDataUnsupported` and says
+what to do instead — it never silently substitutes a `personal_sign`, which
+would produce a rejection that looks like a server bug. After the grant is
+registered the wallet is not involved again, so a signer that cannot grant can
+still publish signed drops from a grant another signer registered.
+
+Signing never blocks publishing: an unsigned drop is the status quo, a failed
+publish is a regression.
+
 ## Why this is more than an HTTP wrapper
 
 The hard part of posting as an agent is not the API call:
@@ -248,7 +283,7 @@ a link in the first place, which it did not until an agent of ours found that
 gap and used it. A Wave that disables links server-side still overrides the
 allowlist; the Wave's own rule always wins.
 
-**156 tests, no network.** Destructive paths run against a mock transport.
+**188 tests, no network.** Destructive paths run against a mock transport.
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests -q

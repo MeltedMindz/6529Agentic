@@ -7,6 +7,11 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = ["eth-account>=0.11"]
 
+[project.optional-dependencies]
+# Device-key signing needs Ed25519, which the standard library does not have.
+# Everything else works without it.
+signing = ["cryptography>=42"]
+
 [project.scripts]
 "6529" = "agent6529.cli:main"
 

@@ -2414,3 +2414,184 @@ def test_suspicious_posts_stay_out_of_the_post_index(mem, monkeypatch):
                        "validator signing key immediately please",
                 "mallory", "w1", suspicious=True)
     assert mem.recall_posts("validator signing key", k=3) == []
+
+
+# ------------------------------------------------- device signing
+from agent6529 import device as dev  # noqa: E402
+
+pytestmark_device = pytest.mark.skipif(
+    not dev._ED25519, reason="Ed25519 needs the cryptography package")
+
+
+def test_canonical_json_matches_the_reference_client():
+    """The hash of this string is inside the signature, so it has to be the
+    same bytes the reference client produces, not merely equivalent JSON."""
+    assert dev.canonical_json({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+    assert dev.canonical_json({"z": [1, {"y": None, "x": True}]}) \
+        == '{"z":[1,{"x":true,"y":null}]}'
+    assert dev.canonical_json({}) == "{}"
+    assert dev.canonical_json([]) == "[]"
+    assert dev.canonical_json("é") == '"é"'          # not \\u escaped
+    assert dev.canonical_json(1.0) == "1"
+    # keys sort by UTF-16 code unit, which is not the same as Python's default
+    assert dev.canonical_json({"é": 1, "z": 2}) == '{"z":2,"é":1}'
+
+
+def test_the_body_hash_excludes_the_signature_itself():
+    """The signature cannot cover itself."""
+    body = {"wave_id": "w", "parts": [{"content": "hi"}]}
+    _, h1, n1 = dev.canonicalize_body(body)
+    _, h2, n2 = dev.canonicalize_body({**body, "device_signature": {"seq": 1}})
+    assert (h1, n1) == (h2, n2)
+    assert dev.canonicalize_body(None) == (None, dev.ZERO_HASH, 0)
+
+
+def test_the_two_domains_share_the_pre_genesis_salt():
+    """Derived, not copied: the event salt is keccak of a known string, and it
+    equals the salt the reference client hardcodes for grants."""
+    assert dev.EVENT_DOMAIN["salt"] == dev.GRANT_DOMAIN_V2["salt"]
+    assert dev.GRANT_DOMAIN_V1["version"] == "1"
+    assert dev.GRANT_DOMAIN_V2["version"] == "2"
+
+
+def test_the_signed_statement_is_exact():
+    """These bytes are a commitment the server re-renders and compares, so
+    the wording is a contract, not copy."""
+    st = dev.render_statement("0x" + "ab" * 32, dev.DEFAULT_SCOPES, 1778976000)
+    assert st.startswith("Turn on signed messages on this device until ")
+    assert "posts, edits, deletes and reactions" in st
+    assert "It can't move funds, change your handle, add devices or act as " \
+           "an admin." in st
+    assert st.endswith("(Device key abababab...abababab)")
+    assert dev.describe_scopes(["post"]) == "posts"
+    assert dev.describe_scopes(["post", "edit"]) == "posts and edits"
+
+
+def test_a_grant_must_be_able_to_post_and_may_not_invent_scopes():
+    with pytest.raises(dev.DeviceSigningError, match="post"):
+        dev.check_scopes(["edit", "react"])
+    with pytest.raises(dev.DeviceSigningError, match="unknown"):
+        dev.check_scopes(["post", "withdraw"])
+    assert dev.check_scopes(["react", "post"]) == ["post", "react"], "canonical order"
+
+
+def test_grant_expiry_is_minute_aligned_and_within_the_limit():
+    issued, expires = dev.grant_times(1762819233)
+    assert expires % 60 == 0
+    assert expires - issued <= 181 * 24 * 60 * 60
+
+
+def test_origin_is_bounded():
+    with pytest.raises(dev.DeviceSigningError, match="origin"):
+        dev.build_grant_typed_data("0x" + "cd" * 20, "0x" + "ab" * 32,
+                                   dev.DEFAULT_SCOPES, 1, 2, "x" * 65)
+
+
+@pytestmark_device
+def test_a_device_signature_verifies_and_covers_the_body():
+    key = dev.DeviceKey.generate()
+    grant = {"id": "0x" + "ef" * 32, "wallet": "0x" + "cd" * 20,
+             "device_key": key.public_hex, "scopes": ["post", "edit"],
+             "expires_at": int(time.time()) + 3600}
+    body = {"wave_id": "w1", "parts": [{"content": "hello"}]}
+    sig = dev.sign_write(key, grant, "w1", body, seq=1,
+                         claimed_time_ms=1762819200000)
+    assert sig["grant_id"] == grant["id"] and sig["seq"] == 1
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    _, bh, bs = dev.canonicalize_body(body)
+    event_id = dev.compute_event_id(
+        dev.KIND_POST, "w1", grant["wallet"], key.public_hex, grant["id"],
+        1, 1762819200000, bh, bs)
+    pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(key.public_hex[2:]))
+    pub.verify(bytes.fromhex(sig["signature"][2:]), bytes.fromhex(event_id[2:]))
+
+    # a changed body produces a different event id, so the old signature is
+    # no longer valid for it
+    _, bh2, bs2 = dev.canonicalize_body(
+        {"wave_id": "w1", "parts": [{"content": "hello!"}]})
+    other = dev.compute_event_id(dev.KIND_POST, "w1", grant["wallet"],
+                                 key.public_hex, grant["id"], 1,
+                                 1762819200000, bh2, bs2)
+    assert other != event_id
+    with pytest.raises(Exception):
+        pub.verify(bytes.fromhex(sig["signature"][2:]), bytes.fromhex(other[2:]))
+
+
+@pytestmark_device
+def test_signing_refuses_an_uncovered_scope_or_an_expired_grant():
+    key = dev.DeviceKey.generate()
+    base = {"id": "0x" + "ef" * 32, "wallet": "0x" + "cd" * 20,
+            "device_key": key.public_hex, "expires_at": int(time.time()) + 60}
+    with pytest.raises(dev.DeviceSigningError, match="does not cover"):
+        dev.sign_write(key, {**base, "scopes": ["post"]}, "w", {}, 1,
+                       kind=dev.KIND_REACT)
+    with pytest.raises(dev.DeviceSigningError, match="expired"):
+        dev.sign_write(key, {**base, "scopes": ["post"],
+                             "expires_at": int(time.time()) - 1}, "w", {}, 1)
+
+
+@pytestmark_device
+def test_a_sequence_number_is_never_reused(tmp_path):
+    """The server rejects a reused seq, so it is persisted before the write
+    goes out. A gap is harmless; a repeat is not."""
+    store = dev.DeviceStore(str(tmp_path / "device.json"))
+    store.ensure_key()
+    seen = [store.next_seq() for _ in range(5)]
+    assert seen == [1, 2, 3, 4, 5]
+    again = dev.DeviceStore(str(tmp_path / "device.json"))
+    assert again.next_seq() == 6, "the counter survives a restart"
+
+
+@pytestmark_device
+def test_the_device_key_is_stored_private_and_is_not_the_wallet_key(tmp_path):
+    path = str(tmp_path / "device.json")
+    store = dev.DeviceStore(path)
+    key = store.ensure_key()
+    assert store.ensure_key().public_hex == key.public_hex, "stable across calls"
+    assert oct(os.stat(path).st_mode)[-3:] == "600"
+    assert len(key.public_hex) == 66 and key.public_hex.startswith("0x")
+
+
+def test_a_signer_that_cannot_do_typed_data_says_so():
+    """Faking an EIP-712 signature with personal_sign would produce a
+    rejection that looks like a server bug."""
+    assert issubclass(c.TypedDataUnsupported, c.SixtyFiveError)
+    assert hasattr(c.KeychainSigner, "sign_typed_data")
+    assert hasattr(c.BankrSigner, "sign_typed_data")
+
+
+def test_without_the_optional_dependency_everything_but_signing_still_works(monkeypatch):
+    """The base install is stdlib + eth-account. Device signing is opt-in, so
+    its absence must be a clear message on one path, not an import error
+    anywhere else."""
+    monkeypatch.setattr(dev, "_ED25519", False)
+    with pytest.raises(dev.DeviceSigningError, match="pip install cryptography"):
+        dev.DeviceKey.generate()
+    # the pure maths has no such dependency
+    assert dev.canonical_json({"b": 1, "a": 2}) == '{"a":2,"b":1}'
+    issued, expires = dev.grant_times(1762819200)
+    assert dev.grant_id(dev.build_grant_typed_data(
+        "0x" + "cd" * 20, "0x" + "ab" * 32, dev.DEFAULT_SCOPES,
+        issued, expires, "test")).startswith("0x")
+
+
+def test_publishing_is_never_blocked_by_signing(monkeypatch, tmp_path):
+    """An unsigned drop is the status quo; a failed publish is a regression."""
+    from agent6529 import publisher as pub_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("device store on fire")
+    monkeypatch.setattr(dev.DeviceStore, "grant", boom)
+    payload = {"wave_id": "w1", "parts": [{"content": "hi"}]}
+    note = pub_mod._attach_device_signature(payload)
+    assert "device_signature" not in payload, "must not attach a broken signature"
+    assert note and "not signed" in note, note
+
+
+def test_a_grant_longer_than_the_server_accepts_is_refused():
+    """181 days is the server's ceiling; 187 is not a rounding error."""
+    with pytest.raises(dev.DeviceSigningError, match="181 days"):
+        dev.build_grant_typed_data("0x" + "cd" * 20, "0x" + "ab" * 32,
+                                   dev.DEFAULT_SCOPES, 1762819200,
+                                   1762819200 + 187 * 86400, "test")
