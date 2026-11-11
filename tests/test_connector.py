@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -965,7 +966,15 @@ def _fake_local(monkeypatch, claims=None, vec=None):
             return {"embeddings": [one(t) for t in payload["input"]]}
         if path == "/api/embeddings":
             return {"embedding": one(payload["prompt"])}
-        return {"response": json.dumps(claims if claims is not None else [])}
+        # A well-behaved extractor: every claim carries a quote that really
+        # appears in the post, because grounded() checks exactly that.
+        prompt = payload.get("prompt", "")
+        m = re.search(r'Post by @[^:]*: "(.*)"', prompt, re.S)
+        body = m.group(1) if m else prompt
+        quote = " ".join(body.split())[:60]
+        return {"response": json.dumps(
+            {"claims": [{"claim": c, "quote": quote}
+                        for c in (claims if claims is not None else [])]})}
     monkeypatch.setattr(mem_mod, "_post", post)
 
 
@@ -990,7 +999,7 @@ def test_suspicious_content_is_quarantined_from_learning(mem, monkeypatch):
 
 def test_learn_creates_cited_notes(mem, monkeypatch):
     _fake_local(monkeypatch, claims=["validators recompute TDH daily",
-                                     "the grant is EIP-712 typed data"])
+                                     "the validator works each day"])
     mem.observe("d9", "a long post explaining how the validator works each day",
                 "eduardo", "w1", "Developers")
     n = mem.learn_batch()
@@ -1050,10 +1059,17 @@ def test_short_posts_produce_no_claims(monkeypatch):
 
 
 def test_extract_tolerates_model_noise(monkeypatch):
+    """A model that wraps its JSON in chat, or ignores the schema and returns
+    a bare array, must still be parsed rather than crash."""
+    src = "a real claim appears in this post, stated plainly for the record"
+
     def post(path, payload, timeout=120):
-        return {"response": 'Sure! Here you go:\n["a real claim"]\nHope that helps'}
+        return {"response": 'Sure! Here you go:\n'
+                + json.dumps({"claims": [{"claim": "a real claim appears here",
+                                          "quote": "a real claim appears"}]})
+                + '\nHope that helps'}
     monkeypatch.setattr(mem_mod, "_post", post)
-    assert mem_mod.extract_claims("x" * 60, "alice") == ["a real claim"]
+    assert mem_mod.extract_claims(src, "alice") == ["a real claim appears here"]
 
 
 def test_extract_survives_unparseable_output(monkeypatch):
@@ -1321,7 +1337,9 @@ def test_embedding_includes_context_header(mem, monkeypatch):
         if path == "/api/embeddings":
             seen.append(payload["prompt"])
             return {"embedding": [1.0, 0.0]}
-        return {"response": '["validators sign daily"]'}
+        return {"response": json.dumps({"claims": [{
+            "claim": "validators sign every day",
+            "quote": "a long post about validators signing every day here"}]})}
     monkeypatch.setattr(mem_mod, "_post", post)
     mem.observe("d1", "a long post about validators signing every day here",
                 "alice", "w1", "Dev Wave", created_at=1794075815)
@@ -1340,7 +1358,9 @@ def test_recall_can_abstain_on_irrelevant_queries(mem, monkeypatch):
         if path == "/api/embeddings":
             p = payload["prompt"]
             return {"embedding": [1.0, 0.0] if "validator" in p else [0.0, 1.0]}
-        return {"response": '["validators sign daily"]'}
+        return {"response": json.dumps({"claims": [{
+            "claim": "validators sign every single day",
+            "quote": "validators signing every single day"}]})}
     monkeypatch.setattr(mem_mod, "_post", post)
     mem.observe("d1", "a long post about validators signing every single day",
                 "alice", "w1")
@@ -1361,7 +1381,9 @@ def test_relative_gap_drops_weak_trailing_hits(mem, monkeypatch):
             return {"embeddings": [pick(t) for t in payload["input"]]}
         if path == "/api/embeddings":
             return {"embedding": pick(payload["prompt"])}
-        return {"response": json.dumps([payload["prompt"].split('"')[-2][:40]])}
+        body = payload["prompt"].split('"')[-2]
+        return {"response": json.dumps({"claims": [{
+            "claim": body[:60], "quote": body[:60]}]})}
     monkeypatch.setattr(mem_mod, "_post", post)
     mem.observe("d1", "a long post containing the strong matching subject here",
                 "a", "w1")
@@ -1395,9 +1417,13 @@ def test_post_degrades_on_bad_json(monkeypatch):
 
 def test_recall_falls_back_when_embedder_times_out(mem, monkeypatch):
     def post(path, payload, timeout=120):
+        if path == "/api/embed":
+            return {"embeddings": [[1.0, 0.0]] * len(payload["input"])}
         if path == "/api/embeddings":
             return {"embedding": [1.0, 0.0]}
-        return {"response": '["the validator grant is typed data"]'}
+        return {"response": json.dumps({"claims": [{
+            "claim": "the validator grant gets signed daily",
+            "quote": "grants and how they get signed daily"}]})}
     monkeypatch.setattr(mem_mod, "_post", post)
     mem.observe("d1", "a long post about grants and how they get signed daily",
                 "bob", "w1")
@@ -1420,7 +1446,7 @@ def test_extraction_prompt_carries_the_post_date(monkeypatch):
     monkeypatch.setattr(mem_mod, "_post", post)
     mem_mod.extract_claims("x" * 120, "a", created_at=1794075815)
     assert "2026-11-07" in seen["prompt"]
-    assert "Resolve pronouns" in seen["prompt"]
+    assert "Never write \"the author\"" in seen["prompt"]
 
 
 def test_recall_returns_the_source_post(mem, monkeypatch):
@@ -1428,7 +1454,9 @@ def test_recall_returns_the_source_post(mem, monkeypatch):
     def post(path, payload, timeout=120):
         if path == "/api/embeddings":
             return {"embedding": [1.0, 0.0]}
-        return {"response": '["leave the validator running overnight"]'}
+        return {"response": json.dumps({"claims": [{
+            "claim": "leave the validator running overnight",
+            "quote": "Keep the node up through tonight"}]})}
     monkeypatch.setattr(mem_mod, "_post", post)
     full = "Yes. Keep the node up through tonight's run and check it at 06:00."
     mem.observe("d1", full, "someholder", "w1", "Ministry")
@@ -1538,7 +1566,7 @@ def test_hybrid_recall_survives_a_build_without_fts(mem, monkeypatch):
 def test_supersede_replaces_a_claim_and_keeps_the_old_row(mem, monkeypatch):
     _fake_local(monkeypatch, claims=["hermes rc.11 is the current release"],
                 vec=[1.0, 0.0])
-    mem.observe("d1", "a long post stating which hermes release is current",
+    mem.observe("d1", "a long post stating that hermes rc.11 is current now",
                 "axiom", "w1", "Dev")
     mem.learn_batch()
     old = mem.db.execute("SELECT id FROM notes").fetchone()["id"]
@@ -2273,3 +2301,70 @@ def test_an_identifier_still_bypasses_the_floor(mem, monkeypatch):
     hits = mem.recall("rc.12", k=3)
     assert hits, "an identifier query must still find its note"
     assert "rc.12" in hits[0].text, [h.text for h in hits]
+
+
+# ------------------------------------------------- grounding
+def test_a_claim_must_be_supported_by_its_source():
+    """Every precision failure measured on the live corpus, as a test.
+
+    A 43-character heading produced three invented "the validator should..."
+    claims; a tequila was misspelled from the source's "Clase Azul"; version
+    numbers appeared that were never in the post.
+    """
+    src = ("Clase Azul and 1946 Don Julio are what I drink at parties, "
+           "and rc.13 shipped on Sunday.")
+    ok = mem_mod.grounded("rc.13 shipped on Sunday", "rc.13 shipped on Sunday", src)
+    assert ok is None, ok
+
+    # fabricated from nothing
+    assert mem_mod.grounded(
+        "The validator should avoid shared public servers",
+        "The validator should avoid shared public servers",
+        "**6529 Validator Hardware Recommendations**") is not None
+
+    # a name the model altered
+    why = mem_mod.grounded("Classe Azul is a tequila", "Clase Azul", src)
+    assert why and "Classe" in why, why
+
+    # an identifier that was never in the post
+    why = mem_mod.grounded("rc.14 shipped on Sunday", "shipped on Sunday", src)
+    assert why and "rc.14" in why, why
+
+    # no quote at all
+    assert mem_mod.grounded("anything", "", src) == "no supporting quote"
+    # a quote that is not verbatim
+    assert mem_mod.grounded("rc.13 shipped", "rc.13 was released on Sunday",
+                            src) == "quote is not verbatim in the source"
+
+
+def test_ungrounded_claims_never_reach_memory(mem, monkeypatch):
+    def post(path, payload, timeout=120):
+        if path in ("/api/embed", "/api/embeddings"):
+            return ({"embeddings": [[1.0, 0.0]] * len(payload.get("input", [1]))}
+                    if path == "/api/embed" else {"embedding": [1.0, 0.0]})
+        return {"response": json.dumps({"claims": [
+            {"claim": "the validator signs once each day",
+             "quote": "the validator signs once each day"},
+            {"claim": "the validator should avoid shared public servers",
+             "quote": "the validator should avoid shared public servers"},
+        ]})}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    mem.observe("d1", "a long post noting that the validator signs once each day",
+                "alice", "w1")
+    assert mem.learn_batch()["notes_created"] == 1, "the invented claim must be dropped"
+    assert "avoid shared" not in mem.db.execute(
+        "SELECT text FROM notes").fetchone()["text"]
+
+
+def test_extraction_reports_why_a_claim_was_rejected(monkeypatch):
+    def post(path, payload, timeout=120):
+        return {"response": json.dumps({"claims": [
+            {"claim": "this one is properly grounded here", "quote": "grounded"},
+            {"claim": "an invented claim about something else entirely",
+             "quote": "nowhere in the post"}]})}
+    monkeypatch.setattr(mem_mod, "_post", post)
+    kept, rejected = mem_mod.extract_claims(
+        "a post where the word grounded appears, and nothing else of note",
+        "alice", with_reasons=True)
+    assert kept == ["this one is properly grounded here"]
+    assert len(rejected) == 1 and "verbatim" in rejected[0]["why"]

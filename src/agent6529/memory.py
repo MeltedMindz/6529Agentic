@@ -35,6 +35,7 @@ import re
 import sqlite3
 import struct
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -288,22 +289,50 @@ def _cosine(a, b) -> float:
 
 
 # ----------------------------------------------------------------- extraction
-EXTRACT_PROMPT = """Extract durable factual claims from this forum post as a \
-JSON array of short strings.
+EXTRACT_PROMPT = """Extract durable factual claims from this forum post.
+
+For each claim also copy the exact words from the post that support it. The
+quote must appear in the post character for character; do not paraphrase it.
 
 Rules:
 - Only claims that would still be useful to know in a week.
-- Keep each claim under 20 words, self-contained.
+- Each claim is one self-contained sentence, 25 to 140 characters.
 - No opinions, greetings, pleasantries, or meta commentary about the post.
-- Resolve pronouns and references: write "the validator", not "it".
+- Say who. The author is @{author}. When the author describes their own work,
+  write "@{author}". Never write "the author", "the poster" or "the user".
 - Replace relative time ("today", "tomorrow", "last week") with the actual
   date. This post was written on {date}.
-- If a claim only makes sense inside this one conversation, leave it out.
-- If the post contains nothing durable, return [].
+- Copy names, versions, numbers and addresses exactly as written.
+- A post that is only a title or a heading, with no body, contains no claims:
+  return {{"claims": []}}.
+- If the post contains nothing durable, return {{"claims": []}}.
 
 Post by @{author}: "{content}"
+"""
 
-JSON array:"""
+# Constrained decoding. Without a schema this model answers an ARRAY request
+# with an OBJECT (its own system prompt asks for one), and the array-shaped
+# regex that used to parse the reply then found nothing and returned []. That
+# was a large part of a measured 70% miss rate on substantive posts.
+EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claims": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string", "minLength": 25,
+                              "maxLength": 240},
+                    "quote": {"type": "string", "maxLength": 160},
+                },
+                "required": ["claim", "quote"],
+            },
+        }
+    },
+    "required": ["claims"],
+}
 
 
 _HANDLE = re.compile(r"@\[?([A-Za-z0-9_]{2,30})\]?")
@@ -377,41 +406,129 @@ def _date_of(created_at: Optional[int]) -> str:
         return "an unknown date"
 
 
+def _norm_text(s: str) -> str:
+    """Fold case, accents and whitespace so a quote can be compared to its
+    source without tripping over "Classé" vs "Clase"."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.lower().split())
+
+
+# Anything carrying a digit, kept whole: "rc.14", not the "14" inside it.
+_IDENT_IN_CLAIM = re.compile(
+    r"[0-9a-z][\w.\-]*\d[\w.\-]*|[\w.\-]+\.(?:io|com|org|net|xyz|dev)",
+    re.I)
+
+
+def grounded(claim: str, quote: str, source: str,
+             allow: Iterable[str] = ()) -> Optional[str]:
+    """Why this claim is not supported by its source, or None if it is.
+
+    A deterministic check, no second model pass. It catches every precision
+    failure measured on the live corpus: three invented "the validator
+    should..." claims from a 43-character heading, a tequila misspelled from
+    "Clase Azul" to "Classe Azul", and version numbers that were never in the
+    post.
+    """
+    src = _norm_text(source)
+    # The prompt asks the model to write the post's real date in place of
+    # "today", so that date is legitimately absent from the source text.
+    allowed = {_norm_text(a) for a in allow if a}
+    q = _norm_text(quote)
+    if len(q) < 8:
+        return "no supporting quote"
+    if q not in src:
+        return "quote is not verbatim in the source"
+    for ident in _IDENT_IN_CLAIM.findall(claim or ""):
+        token = _norm_text(ident).rstrip(".,;:)")
+        if token in allowed or any(token in a for a in allowed):
+            continue
+        if token not in src:
+            return f"identifier not in the source: {ident}"
+    # Proper nouns the model may have altered. Every capitalised word of four
+    # or more characters, including the first: "Classe Azul" for the source's
+    # "Clase Azul" opened the claim, and skipping sentence-initial words let
+    # it through. A legitimately grounded opener is in the source anyway.
+    for word in re.findall(r"\b([A-Z][a-zA-Z]{3,})\b", claim or ""):
+        if _norm_text(word) not in src and _norm_text(word) not in allowed:
+            return f"name not in the source: {word}"
+    return None
+
+
 def extract_claims(content: str, author: str, model: str = EXTRACT_MODEL,
-                   max_claims: int = 6,
-                   created_at: Optional[int] = None) -> List[str]:
-    """Pull durable claims out of a drop using the local model."""
+                   max_claims: int = 8,
+                   created_at: Optional[int] = None,
+                   with_reasons: bool = False):
+    """Pull durable claims out of a drop using the local model.
+
+    Every claim must carry a verbatim quote from the post, and anything that
+    does not survive `grounded()` is dropped before it can become memory.
+    """
     content = (content or "").strip()
     if len(content) < 40:
-        return []                      # too short to carry a durable claim
+        return ([], []) if with_reasons else []
     # think=False is load-bearing, not an optimisation. axiom-extract is built
     # on a hybrid reasoning model; Ollama routes its reasoning to a separate
     # `thinking` field, and on a real-length post it spends the entire
     # num_predict budget there and returns an EMPTY `response`. Measured on
     # backlogged observations: default -> resp=0, eval=1024, done=length, 39s.
     # With think=False -> resp=370, eval=95, done=stop, 4.4s.
+    # /api/generate, not /api/chat: on this Ollama build /api/chat silently
+    # ignores `format` when think is false, so the schema never constrains
+    # anything.
+    body = content[:12000]
     d = _post("/api/generate", {
         "model": model, "stream": False, "think": False,
+        "format": EXTRACT_SCHEMA,
+        "options": {"temperature": 0.0, "num_predict": 700},
         "prompt": EXTRACT_PROMPT.format(author=author or "unknown",
-                                        content=content[:4000],
+                                        content=body,
                                         date=_date_of(created_at)),
     })
     raw = (d.get("response") or "").strip()
-    m = re.search(r"\[.*\]", raw, re.S)
-    if not m:
-        return []
+
+    def _claims_from(blob):
+        """Accept the schema's object, and a bare array from a model that
+        ignored `format`. Never raise on an unexpected shape."""
+        if isinstance(blob, dict):
+            got = blob.get("claims")
+            return got if isinstance(got, list) else []
+        return blob if isinstance(blob, list) else []
+
     try:
-        items = json.loads(m.group(0))
+        items = _claims_from(json.loads(raw))
     except json.JSONDecodeError:
-        return []
-    out: List[str] = []
+        m = re.search(r"\{.*\}|\[.*\]", raw, re.S)
+        try:
+            items = _claims_from(json.loads(m.group(0))) if m else []
+        except json.JSONDecodeError:
+            items = []
+
+    kept: List[str] = []
+    rejected: List[Dict[str, str]] = []
+    seen = set()
     for it in items:
-        if not isinstance(it, str):
+        if not isinstance(it, dict):
             continue
-        s = " ".join(it.split()).strip(' "')
-        if 8 <= len(s) <= 240:
-            out.append(s)
-    return out[:max_claims]
+        claim = " ".join(str(it.get("claim") or "").split()).strip(' "')
+        quote = str(it.get("quote") or "")
+        # The schema asks the model for 25+ characters; this is the safety
+        # net, so it is permissive on length and strict on shape. Two-word
+        # fragments like "Classe Azul" are what a corpus of them looks like.
+        if not (12 <= len(claim) <= 240) or len(claim.split()) < 3:
+            rejected.append({"claim": claim[:80], "why": "fragment"})
+            continue
+        why = grounded(claim, quote, body, allow=(_date_of(created_at),))
+        if why:
+            rejected.append({"claim": claim[:80], "why": why})
+            continue
+        key = _norm_text(claim)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(claim)
+    kept = kept[:max_claims]
+    return (kept, rejected) if with_reasons else kept
 
 
 # ----------------------------------------------------------------- store
