@@ -891,7 +891,10 @@ def cmd_recall(args) -> int:
 
     mem = mem_mod.Memory()
     try:
-        if args.about:
+        if args.posts:
+            hits = mem.recall_posts(args.query, k=args.limit,
+                                    author=args.author, source=args.source)
+        elif args.about:
             hits = mem.about(args.about, k=args.limit, source=args.source)
         else:
             if not args.query:
@@ -1201,6 +1204,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("--source", default=None, metavar="SURFACE",
                     help="scope to one surface, e.g. 6529 or twitter; "
                          "omit to search everything")
+    sp.add_argument("--posts", action="store_true",
+                    help="search the posts themselves, not the claims drawn "
+                         "from them; finds what distillation dropped")
     sp.set_defaults(fn=cmd_recall)
 
     sp = sub.add_parser("doctor",

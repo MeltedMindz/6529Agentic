@@ -1,0 +1,135 @@
+{
+  "when": "2026-11-11T07:36:31-0800",
+  "embed_model": "nomic-embed-text:latest",
+  "extract_model": "axiom-extract:latest",
+  "min_score": 0.57,
+  "relative_gap": 0.06,
+  "fts_enabled": true,
+  "corpus": {
+    "observations": 492,
+    "notes": 246,
+    "notes_embedded": 246,
+    "by_surface": {
+      "6529": 144,
+      "twitter": 102
+    },
+    "by_tier": {
+      "public_post_by_self": 210,
+      "self_note": 34,
+      "third_party": 2
+    },
+    "duplicate_note_texts": 1,
+    "notes_under_25_chars": 8,
+    "notes_with_lost_referent": 5,
+    "db_bytes": 1536000
+  },
+  "retrieval": {
+    "n": 12,
+    "p_at_1": 1.0,
+    "recall_at_k": 1.0,
+    "mrr": 1.0,
+    "ms_per_query": 31.1,
+    "cases": [
+      {
+        "q": "what does a home validator connect to",
+        "rank": 1,
+        "top1": "home validators connect outbound only"
+      },
+      {
+        "q": "how many addresses have TDH",
+        "rank": 1,
+        "top1": "we have 10,000 addresses with tdh. we have to find them!"
+      },
+      {
+        "q": "can I bookmark messages in a wave",
+        "rank": 1,
+        "top1": "you can now bookmark any message in any wave."
+      },
+      {
+        "q": "does the validator know which country it is in",
+        "rank": 1,
+        "top1": "location: your validator figures out its own country"
+      },
+      {
+        "q": "what is the deadline time today",
+        "rank": 1,
+        "top1": "turn it back on before 19:30 utc today"
+      },
+      {
+        "q": "can competitions be anonymous",
+        "rank": 1,
+        "top1": "you can now start competitions where participants are anonymous until "
+      },
+      {
+        "q": "has message search been improved",
+        "rank": 1,
+        "top1": "we now have a better more flexible message search."
+      },
+      {
+        "q": "when do alpha testers get the node software",
+        "rank": 1,
+        "top1": "the first validation node software to be available to alpha testers in"
+      },
+      {
+        "q": "when is rc.13 expected",
+        "rank": 1,
+        "top1": "rc.13 is targeted ambitiously by end of day"
+      },
+      {
+        "q": "what did they do with state machines",
+        "rank": 1,
+        "top1": "it identifies the implicit state machines in the validator and convert"
+      },
+      {
+        "q": "how does the font load",
+        "rank": 1,
+        "top1": "main font is requested immediately instead of after the stylesheet"
+      },
+      {
+        "q": "who are the museum signers",
+        "rank": 1,
+        "top1": "the author intends to add 3 new signers and 2 team members to the netw"
+      }
+    ],
+    "identifier_discrimination": [
+      {
+        "q": "rc.13",
+        "ok": true,
+        "top1": "rc.13 is targeted ambitiously by end of day"
+      },
+      {
+        "q": "RC9",
+        "ok": true,
+        "top1": "It is important to be at least on RC9 by then otherwise you will fall "
+      }
+    ],
+    "identifier_ok": 2,
+    "out_of_scope_n": 6,
+    "out_of_scope_leaks": 0,
+    "false_positive_rate": 0.0,
+    "leaks": []
+  },
+  "extraction_health": {
+    "learned_observations": 212,
+    "substantive": 78,
+    "substantive_with_no_notes": 25,
+    "extraction_miss_rate": 0.321,
+    "chatter": 134,
+    "chatter_that_produced_notes": 7,
+    "examples_missed": [
+      "New project. \n\nTo be honest, just a new README file. \n\nNo project yet. \n\n\"Will it Blend\"? Who knows ",
+      "An unofficial single page map of what 6529 actually runs, which repositories are alive, and how the ",
+      "An unofficial single page map of what 6529 actually runs, which repositories are alive, and how the ",
+      "Ive built a Football (UK Football) site and its very much WIP\n\n\nIt currently has one quiz running ea",
+      "would love to know if there are any best practices for making updates and upgrading models that help"
+    ]
+  },
+  "timings": {
+    "embed_first_call_ms": 29.4,
+    "embed_warm_median_ms": 26.4,
+    "scan_ms": 3.52,
+    "scan_us_per_vector": 14.3,
+    "projected_scan_ms_at_10k": 143.3,
+    "projected_scan_ms_at_100k": 1432.9
+  }
+}

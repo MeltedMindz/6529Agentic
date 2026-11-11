@@ -131,3 +131,37 @@ among notes the dense leg already admitted.
 
 The margin is 0.047 wide on a small sample, so it is a calibration to
 re-measure as the corpus grows, not a constant.
+
+## Coverage and extraction, 2026-11-11 (`after-coverage-20261111.json`)
+
+| | baseline (131 notes) | now (246 notes) |
+|---|---|---|
+| P@1 | 0.917 | **1.000** |
+| MRR | 0.958 | **1.000** |
+| identifier discrimination | 1/2 | **2/2** |
+| abstention leaks | 6/6 | **0/6** |
+| extraction miss rate | 0.696 | **0.321** |
+| scan | 57.8 us/vector | **14.3 us/vector** |
+
+Two changes behind the extraction number: the model is now constrained by a
+JSON schema and must quote its source, and the posts that still produce no
+claim are no longer invisible.
+
+`recall_posts()` searches the observations themselves — the lossless layer
+underneath the claims. A post that produced nothing could not be found at
+all, however well it answered the question, and 171 were in that state,
+including the Epoch 2 airdrop policy and the announcement of end-to-end
+encrypted DMs. Both are now retrievable.
+
+It is deliberately the *second* layer: `context_for_reply` consults it only
+when the distilled claims return nothing, so a claim always outranks a raw
+quotation, and a recalled post is labelled `from a post by @someone` rather
+than presented as settled fact.
+
+Posts need their own abstention gate, and need it more. A post is long enough
+to contain almost any single word by accident: ungated, the post layer
+answered **five of six** out-of-scope questions. Requiring two distinct query
+terms, or one identifier, takes that to 0/6 while keeping all four of the
+previously-unreachable posts findable. Document frequency is also counted in
+the table being searched — a word can be rare among one-sentence claims and
+ordinary in the full posts they came from.

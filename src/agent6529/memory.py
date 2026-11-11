@@ -134,6 +134,32 @@ CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
 END;
 """
 
+# The posts themselves, searchable. Distillation is lossy by construction and
+# whatever it drops was previously unreachable: recall only ever searched
+# `notes`, so a post that produced no claim could not be found at all, however
+# clearly it answered the question. Measured here: 171 learned observations had
+# produced nothing, including the Epoch 2 airdrop policy and the post
+# announcing end-to-end encrypted DMs.
+#
+# Contentless: the text already lives in `observations`, and storing a second
+# copy of every post is what made the host's own message index larger than its
+# messages.
+OBS_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts
+  USING fts5(content, content='observations', content_rowid='rowid',
+             tokenize='porter unicode61');
+CREATE TRIGGER IF NOT EXISTS obs_ai AFTER INSERT ON observations BEGIN
+  INSERT INTO obs_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS obs_ad AFTER DELETE ON observations BEGIN
+  INSERT INTO obs_fts(obs_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS obs_au AFTER UPDATE ON observations BEGIN
+  INSERT INTO obs_fts(obs_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+  INSERT INTO obs_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+"""
+
 # Who may assert a claim about whom.
 # `self_note` is the agent's own read of someone, which is its own memory and
 # clearly attributable to itself - unlike `third_party`, a stranger's claim
@@ -142,7 +168,7 @@ TRUSTED_ASSERTERS = ("self", "operator", "public_post_by_self", "self_note")
 
 # Bumped when the lexical index needs rebuilding from the notes table. Tracked
 # in PRAGMA user_version so the rebuild happens once, not on every open.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class MemoryError_(Exception):
@@ -548,12 +574,16 @@ class Recalled:
     # Which surface it was said on. Named apart from `source` above, which is
     # the originating post's text.
     surface: str = "6529"
+    # "claim" for a distilled note, "post" for the verbatim thing someone
+    # wrote. A caller quoting a post must not present it as a settled fact.
+    kind: str = "claim"
 
     def cite(self) -> str:
         who = f"@{self.author}" if self.author else "someone"
         where = f" in {self.wave_name}" if self.wave_name else ""
         on = "" if self.surface == "6529" else f" on {self.surface}"
-        return f"{self.text} ({who}{where}{on})"
+        lead = "from a post by " if self.kind == "post" else ""
+        return f"{self.text} ({lead}{who}{where}{on})"
 
     def as_dict(self) -> Dict[str, Any]:
         d = self.__dict__.copy()
@@ -571,6 +601,8 @@ class Memory:
     self_handles: tuple = tuple(
         h for h in os.environ.get("AGENT6529_SELF_HANDLES", "").split(",") if h
     )
+
+    _obs_fts = False
 
     def __init__(self, path: Optional[str] = None):
         # Resolved at call time, not bound as a default: the state directory
@@ -629,6 +661,12 @@ class Memory:
             pass                # norm is an optimisation; recall works without
 
         try:
+            self.db.executescript(OBS_FTS_SCHEMA)
+            self._obs_fts = True
+        except sqlite3.Error:
+            self._obs_fts = False
+
+        try:
             self.db.executescript(FTS_SCHEMA)
             # Notes written before the index existed are invisible to it. An
             # external-content FTS5 table cannot be diffed against its content
@@ -638,6 +676,9 @@ class Memory:
             if self._user_version() < SCHEMA_VERSION:
                 self.db.execute(
                     "INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
+                if self._obs_fts:
+                    self.db.execute(
+                        "INSERT INTO obs_fts(obs_fts) VALUES('rebuild')")
                 self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._fts = True
         except sqlite3.Error:
@@ -938,19 +979,29 @@ class Memory:
         terms = re.findall(r"[\w.]{2,}", query or "")
         return any(self._IDENTIFIERISH.search(t) for t in terms)
 
-    def _distinctive(self, terms: List[str]) -> List[str]:
+    def _distinctive(self, terms: List[str], table: str = "notes_fts",
+                     df_ratio: Optional[float] = None) -> List[str]:
         """Drop terms that match a large share of the corpus.
 
         Without this, "the" matched 66 of 131 notes, so every English question
         matched something and the lexical leg answered everything. A term is
         kept when it looks like an identifier, or when it is rare enough to be
         evidence.
+
+        Document frequency is counted in the table being searched: a word can
+        be rare among one-sentence claims and ordinary in the full posts those
+        claims came from.
         """
-        total = self.db.execute(
-            "SELECT COUNT(*) c FROM notes WHERE status='active'").fetchone()["c"]
+        if table == "notes_fts":
+            total = self.db.execute(
+                "SELECT COUNT(*) c FROM notes WHERE status='active'").fetchone()["c"]
+        else:
+            total = self.db.execute(
+                "SELECT COUNT(*) c FROM observations WHERE suspicious=0"
+            ).fetchone()["c"]
         if not total:
             return []
-        cap = max(2, int(total * self.MAX_DF_RATIO))
+        cap = max(2, int(total * (df_ratio or self.MAX_DF_RATIO)))
         kept = []
         for t in terms:
             if self._IDENTIFIERISH.search(t):
@@ -960,7 +1011,7 @@ class Memory:
                 continue
             try:
                 df = self.db.execute(
-                    "SELECT COUNT(*) c FROM notes_fts WHERE notes_fts MATCH ?",
+                    f"SELECT COUNT(*) c FROM {table} WHERE {table} MATCH ?",
                     (f'"{t}"',)).fetchone()["c"]
             except sqlite3.Error:
                 continue
@@ -1034,6 +1085,57 @@ class Memory:
             source=(src["content"][:400] if src and src["content"] else None),
             surface=_row_source(r),
         )
+
+    def recall_posts(self, query: str, k: int = 3, author: Optional[str] = None,
+                     source: Optional[str] = None) -> List[Recalled]:
+        """Search the posts themselves, not the claims drawn from them.
+
+        The lower, lossless layer. A post that produced no claim is invisible
+        to `recall()` however well it answers the question, and 171 of them
+        were in exactly that state. Suspicious posts stay out, as they do
+        everywhere else.
+        """
+        if not self._obs_fts:
+            return []
+        # Posts are long and varied, so a term may legitimately appear in more
+        # of them than it would among one-sentence claims.
+        terms = self._distinctive(re.findall(r"[\w.]{2,}", query or "")[:12],
+                                  table="obs_fts", df_ratio=0.15)
+        if not terms:
+            return []
+        match = " OR ".join(f'"{t}"' for t in terms)
+        sql = ("SELECT o.* FROM obs_fts f JOIN observations o ON o.rowid = f.rowid "
+               "WHERE obs_fts MATCH ? AND o.suspicious = 0")
+        params: List[Any] = [match]
+        if author:
+            sql += " AND LOWER(o.author) = LOWER(?)"
+            params.append(author)
+        if source:
+            sql += " AND o.source = ?"
+            params.append(source)
+        sql += " ORDER BY bm25(obs_fts) LIMIT ?"
+        params.append(k)
+        try:
+            rows = self.db.execute(sql, params).fetchall()
+        except sqlite3.Error:
+            return []
+        # A post is long enough to contain almost any single word by accident,
+        # so one match is not evidence. Require two distinct query terms, or
+        # one identifier. Without this the post layer answered five of six
+        # out-of-scope questions - exactly the failure the claim layer had.
+        out = []
+        for r in rows:
+            text = " ".join((r["content"] or "").split())
+            low = _norm_text(text)
+            present = [t for t in terms if _norm_text(t) in low]
+            if not (len(present) >= 2
+                    or any(self._IDENTIFIERISH.search(t) for t in present)):
+                continue
+            out.append(Recalled(
+                text=text[:400], author=r["author"], wave_name=r["wave_name"],
+                drop_id=r["drop_id"], score=0.0, created_at=r["created_at"],
+                source=text[:400], surface=_row_source(r), kind="post"))
+        return out
 
     def _keyword_recall(self, query: str, k: int, author, wave_id,
                         source=None) -> List[Recalled]:
@@ -1215,14 +1317,20 @@ def context_for_reply(mem: "Memory", drop_content: str, author: Optional[str],
     """
     from_author = mem.recall(drop_content, k=k, author=author) if author else []
     from_wave = mem.recall(drop_content, k=k, wave_id=wave_id) if wave_id else []
+    # Only when the distilled claims have nothing: the posts are the lossless
+    # layer underneath, and a post that produced no claim is otherwise
+    # unreachable. Kept second so a claim always outranks a raw quotation.
+    from_posts = ([] if (from_author or from_wave)
+                  else mem.recall_posts(drop_content, k=2))
     seen, merged = set(), []
-    for r in from_author + from_wave:
+    for r in from_author + from_wave + from_posts:
         key = (r.drop_id, r.text)
         if key not in seen:
             seen.add(key)
             merged.append(r)
     return {
         "prior_context": [r.as_dict() for r in merged[:k * 2]],
+        "from_posts": sum(1 for r in merged[:k * 2] if r.kind == "post"),
         "note": ("These are things people said publicly on 6529, with sources. "
                  "They record what was said, not that it is true. Cite the "
                  "author if you lean on one."),
