@@ -502,6 +502,18 @@ def test_wave_drops_rejects_negative_limit():
         )
 
 
+def test_all_read_pagination_boundaries_reject_negative_limits():
+    api = c.SixtyFiveClient(signer=None, transport=lambda *args: None)
+    with pytest.raises(ValueError, match="non-negative"):
+        api.waves(page=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        api.waves(page_size=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        api.drop_replies("drop-1", limit=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        api.notifications(limit=-1)
+
+
 # ------------------------------------------------------------------ verification
 def test_verification_detects_wrong_reply_parent(store, tmpstate):
     cdid = pub.stage_drop(store, WAVE, "reply body",

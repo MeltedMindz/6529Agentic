@@ -674,6 +674,8 @@ class SixtyFiveClient:
     # ---------------- waves ----------------
     def waves(self, view: str = "HOT", name=None, page=1, page_size=20,
               followed_only=None, overview_type=None) -> Any:
+        if page < 0 or page_size < 0:
+            raise ValueError("page and page_size must be non-negative")
         # Live-verified 2026-11-07: view=OVERVIEW is rejected with
         # '"overview_type" is required'. Supply a default rather than 400.
         if view == "OVERVIEW" and not overview_type:
@@ -746,6 +748,8 @@ class SixtyFiveClient:
 
     def drop_replies(self, drop_id, limit=20, serial_no_limit=None,
                      search_strategy="FIND_OLDER") -> Any:
+        if limit < 0:
+            raise ValueError("reply limit must be non-negative")
         return self._read(
             f"/v2/drops/{drop_id}/replies",
             params={
@@ -757,6 +761,8 @@ class SixtyFiveClient:
 
     def notifications(self, limit=20, id_less_than=None, unread_only=None,
                       cause=None) -> Any:
+        if limit < 0:
+            raise ValueError("notification limit must be non-negative")
         return self._request(
             "GET",
             "/v2/notifications",
