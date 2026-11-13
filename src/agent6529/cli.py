@@ -847,6 +847,12 @@ def cmd_learn(args) -> int:
     """Ingest allowlisted Waves into memory, then distil with a local model."""
     from agent6529 import memory as mem_mod
 
+    # Fail closed before touching the network or opening the SQLite queue.
+    if args.limit < 0:
+        raise SystemExit("drop limit must be non-negative")
+    if args.distil_limit < 0:
+        raise SystemExit("learning limit must be non-negative")
+
     cfg = pol.load_config()
     api = build_api(cfg)
     mem = mem_mod.Memory()

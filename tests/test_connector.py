@@ -26,6 +26,7 @@ from agent6529 import policy as pol  # noqa: E402
 from agent6529 import publisher as pub  # noqa: E402
 from agent6529.state import Store  # noqa: E402
 from agent6529 import memory as mem_mod  # noqa: E402
+from agent6529 import cli  # noqa: E402
 
 WAVE = "wave-aaa"
 ADDR = "0x1111111111111111111111111111111111111111"
@@ -500,6 +501,17 @@ def test_wave_drops_rejects_negative_limit():
         c.SixtyFiveClient(signer=None, transport=lambda *args: None).wave_drops(
             WAVE, limit=-1
         )
+
+
+def test_learn_rejects_negative_limits_before_loading_config(monkeypatch):
+    monkeypatch.setattr(cli.pol, "load_config",
+                        lambda: pytest.fail("config must not load"))
+    with pytest.raises(SystemExit, match="drop limit must be non-negative"):
+        cli.cmd_learn(type("Args", (), {"limit": -1, "distil_limit": 5,
+                                         "distil": True})())
+    with pytest.raises(SystemExit, match="learning limit must be non-negative"):
+        cli.cmd_learn(type("Args", (), {"limit": 5, "distil_limit": -1,
+                                         "distil": True})())
 
 
 def test_all_read_pagination_boundaries_reject_negative_limits():
