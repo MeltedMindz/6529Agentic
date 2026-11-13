@@ -64,15 +64,54 @@ fi
 # -------------------------------------------------- signing comes before updating
 # Reading the ledger needs the service account. If that cannot be checked, do
 # not guess: an unknown signing state is a reason to wait, not to proceed.
-status="$(root -u "$SVC_USER" "$BIN" status --data-dir "$DATA_DIR" 2>&1)" || status=""
-if [ -z "$status" ]; then
-  fail "cannot read validator status as $SVC_USER; deferring rather than updating blind"
+# Read the JSON and keep it when the exit code is non-zero.
+#
+# `validator status` exits 5 for "running, but something needs you", which its
+# own EXIT STATUS text lists as including "a restart an update waits for" -
+# i.e. exactly the urgent release this script exists to install. The old
+# `|| status=""` discarded a perfectly good status on exit 5 and then deferred
+# for "unreadable status", so an URGENT update could never be applied. Observed
+# 2026-11-13: rc.15 -> rc.16 (severity urgent) deferred every run while the
+# status body said day.signed=true and restart_gap=Safe. Non-urgent releases
+# exit 0 and were unaffected, which is why rc.14 -> rc.15 had worked.
+#
+# Exit 3 means the service is not running; that IS a reason not to proceed.
+#
+# Gate on structured fields, not prose: the old grep wanted "signature is sent"
+# or "nothing to do", neither of which the current release emits (it says
+# "signed <date>" / "is agreed"). day.signed and restart_gap are the contract.
+status="$(root -u "$SVC_USER" "$BIN" status --json --data-dir "$DATA_DIR" 2>/dev/null)"
+status_rc=$?
+if [ "$status_rc" = 3 ] || [ -z "$status" ]; then
+  fail "cannot read validator status as $SVC_USER (exit $status_rc); deferring rather than updating blind"
   exit 4
 fi
-if ! printf '%s' "$status" | grep -qiE "signature is sent|nothing to do"; then
-  say "today's vote is not sent yet; deferring the update"
-  exit 4
-fi
+
+gate="$(printf '%s' "$status" | "$PY" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("UNREADABLE"); raise SystemExit
+day = d.get("day") or {}
+gap = str(d.get("restart_gap") or "")
+if day.get("signed") is not True:
+    print("UNSIGNED", day.get("state") or "?")
+elif gap.lower() != "safe":
+    print("UNSAFE", gap or "?")
+else:
+    print("GO")
+' 2>/dev/null)"
+
+case "$gate" in
+  GO) : ;;
+  UNSIGNED*) say "today's vote is not sent yet (day.state=${gate#UNSIGNED }); deferring the update"
+             exit 4 ;;
+  UNSAFE*)   say "the validator says a restart is not safe yet (restart_gap=${gate#UNSAFE }); deferring the update"
+             exit 4 ;;
+  *)         fail "validator status JSON unreadable as $SVC_USER; deferring rather than updating blind"
+             exit 4 ;;
+esac
 
 PREV="$(readlink "$BIN" 2>/dev/null || true)"
 [ -n "$PREV" ] || fail "warning: $BIN is not a symlink, rollback will not be automatic"
